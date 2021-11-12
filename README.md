@@ -10,3 +10,4 @@ The size of these particles are equals to their mass.
 This word has wall, and when particles hit the wall, they will be reflected.
 
 ![image](./imgs/Nbodies-cap.gif)
+
