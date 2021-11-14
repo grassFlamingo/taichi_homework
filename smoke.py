@@ -143,11 +143,11 @@ def generate_pattern_t(img: ti.template(), t: float):
     for i, j in img:
         _i = float(i) / s0
         _j = float(j) / s1
-        _p = rot_fbm(_i + 0.1*t, _j + 0.2 + 0.1*t)
+        _p = rot_fbm(_i + 0.1*t, _j + 0.2 + 0.3*t)
         img[i, j] = [
-            0.1 * rot_fbm(_i + 0.9 + t, _j  + 0.17 + t),
+            0.1 * rot_fbm(_i + 0.9 + t, _j  + 0.17 +  0.02*t),
             rot_fbm(_i + 0.1 + 0.2*t, _j + 0.2*t)**2,
-            rot_fbm(_i + _p + 0.2*t, _j + 0.1*_p + 0.1*t),
+            0.8 * rot_fbm(_i + _p + 0.2*t, _j + 0.1*_p + 0.1*t),
         ]
 
 N = 512

@@ -143,7 +143,9 @@ cython_debug/
 
 --Diffuse
 --Galaxy
+--Shadertoys
 taichi_ray_tracing
 taichiCourse01
 .vscode
 
+zoo

@@ -164,3 +164,31 @@ a sparse SNode-tree
 - `ti.activate/deactive(snode, [i,j])`
 - `snode.deactivate_all()`: deactivate cell and all its children
 - `ti.rescale_index(snode/field, ancestor_snode, index)`
+
+## print
+
+- `ti.static_print`
+- using GUI
+- init debug=False|True; some assert
+- assert will be ignored in release mode
+- `ti.static_assert`
+- init excepthook=True
+- advanced_optimization=False
+- cpu_max_num_threads=1
+- `+=` atomic
+- don't call numpy function in ti.kernel
+- not support multiple return
+- slices not supported
+- profiler
+- init kernel_profiler=True
+
+## Thread Block Grid
+
+- `ti.block_dim()`
+- `ti.block_local()`
+
+## step function
+
+- ` -- 0 -- t -- 1 --`
+- `(3-2*t) * t**2`
+
