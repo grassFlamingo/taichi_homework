@@ -11,7 +11,7 @@ ti.cast(variable, type)
 
 v3f = ti.types.vector(3, ti.f32)
 m2f = ti.types.matrix(2,2,ti.f32)
-ray = ti.types.struce(ro=v3f, rd=v3f, l=ti.f32)
+ray = ti.types.struct(ro=v3f, rd=v3f, l=ti.f32)
 
 ```
 
@@ -192,3 +192,17 @@ a sparse SNode-tree
 - ` -- 0 -- t -- 1 --`
 - `(3-2*t) * t**2`
 
+## Ray tracing
+
+Briefly: (main idea only)
+- color only
+  - hit object; return object color
+  - hit source; return source color
+- lambertian reflection:
+  - color * cos hit point to source
+- blinn phong model:
+  - alpha * diffuse color + beta * specular color
+- blinn phong model + shadow:
+  - (alpha * diffuse color + beta * specular color) * shadow weight
+- whitted style ray tracing:
+  - 
