@@ -11,3 +11,6 @@ This word has wall, and when particles hit the wall, they will be reflected.
 
 ![image](./imgs/Nbodies-cap.gif)
 
+## Ball Hit Spring
+
+![img](./imgs/ball-hit-spring.gif)

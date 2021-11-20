@@ -48,6 +48,7 @@ def render(camera: ti.template(), kn: float):
         for _ in range(samples_per_pixel):
             color += ray_color(ray)
         color /= samples_per_pixel
+        
         cc = canvas[i,j]
         canvas[i, j] += kn * (color - cc)
 
@@ -255,7 +256,7 @@ while gui.running:
     render(camera, 1.0 / cnt)
     gui.set_image(np.sqrt(canvas.to_numpy()))
 
-    if cnt == 1.0:
-        gui.show("imgs/raytrace-%.1f.jpg"%cnt)
+    if cnt == 20.0:
+        gui.show("imgs/raytrace-%d.jpg"%cnt)
     else:
         gui.show()

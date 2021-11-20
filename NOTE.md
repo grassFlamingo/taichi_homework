@@ -18,7 +18,7 @@ ray = ti.types.struct(ro=v3f, rd=v3f, l=ti.f32)
 ## ti.filed
 
 ```python
-ti.filed(dtype=ti.f32, shape=(256,256))
+ti.field(dtype=ti.f32, shape=(256,256))
 ```
 
 a global N-d array of elements
