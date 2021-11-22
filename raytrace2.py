@@ -150,7 +150,6 @@ scene.add_obj(
     )
 )
 
-
 scene.add_obj(
     Scene.Sphere(
         ti.Vector([0, 0, 1]),
@@ -161,25 +160,27 @@ scene.add_obj(
 )
 
 ply = PLYReader()
-ply.read_ply("./hidden/Lowpoly_tree_sample.ply")
+ply.read_ply("./hidden/tree2.ply")
 # ply.read_ply("./hidden/teamugblend.ply")
 
-soup = Scene.TriangleSoup(ply.num_faces, Scene.M_diffuse)
+soup = Scene.TriangleSoup(ply.num_triangles, Scene.M_diffuse)
 
 for a, b, c, rgba in ply.face_iter():
+    # print(a, b, c, rgba)
     soup.append(
         ti.Vector(a),
         ti.Vector(b),
         ti.Vector(c),
-        color=ti.Vector([rgba[0], rgba[1], rgba[2]]))
+        # color=ti.Vector([rgba[0], rgba[1], rgba[2]]))
+        color=ti.Vector(np.random.rand(3) * 0.8 + 0.2))
 
 scene.add_obj(soup, "tree")
 
 canvas.fill(0)
 
 camera = Scene.Camera()
-camera.set_look_from(5.0, 0.0, 0.5)
-camera.set_look_at(-1.0, 0.0, 0.0)
+camera.set_look_from(13.0, 0.5, 6.5)
+camera.set_look_at(1.5, 0.5, 1.0)
 camera.reset()
 
 gui = ti.GUI("ray tracing", res=(image_width, image_height))

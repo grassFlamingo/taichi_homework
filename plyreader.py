@@ -21,6 +21,7 @@ class PLYReader:
         self.faces = []
         self.num_vertex = 0
         self.num_faces = 0
+        self.num_triangles = 0
         self.meta_vertex = []
         self.meta_faces = []
         self.vertex_block_size = 0
@@ -82,27 +83,32 @@ class PLYReader:
                 else:
                     self._read_binary(ply, *meta)
 
-            for i, tag in enumerate(self.meta_vertex):
-                t = tag[0]
-                if t == 'x':
-                    self._vxyz_idx[0] = i
-                elif t == 'y':
-                    self._vxyz_idx[1] = i
-                elif t == 'z':
-                    self._vxyz_idx[2] = i
+        for i, tag in enumerate(self.meta_vertex):
+            t = tag[0]
+            if t == 'x':
+                self._vxyz_idx[0] = i
+            elif t == 'y':
+                self._vxyz_idx[1] = i
+            elif t == 'z':
+                self._vxyz_idx[2] = i
 
-            for i, tag in enumerate(self.meta_faces):
-                t = tag[0]
-                if t == "vertex_indices":
-                    self._vertex_idx = i
-                elif t == "red":
-                    self._rgba_idx[0] = i
-                elif t == "green":
-                    self._rgba_idx[1] = i
-                elif t == "blue":
-                    self._rgba_idx[2] = i
-                elif t == "alpha":
-                    self._rgba_idx[3] = i
+        for i, tag in enumerate(self.meta_faces):
+            t = tag[0]
+            if t == "vertex_indices":
+                self._vertex_idx = i
+            elif t == "red":
+                self._rgba_idx[0] = i
+            elif t == "green":
+                self._rgba_idx[1] = i
+            elif t == "blue":
+                self._rgba_idx[2] = i
+            elif t == "alpha":
+                self._rgba_idx[3] = i
+
+        # count triangles
+        self.num_triangles = 0
+        for fi in self.faces:
+            self.num_triangles += len(fi[self._vertex_idx]) - 2
 
     def _read_binary(self, ply, meta: list, dst: list, count: int):
         for i in range(count):
@@ -159,7 +165,7 @@ class PLYReader:
         ]).reshape(-1)
 
     def get_rgba(self, idx):
-        ans = np.zeros(4, dtype=np.float32)
+        ans = np.ones(4, dtype=np.float32)
         for i, ci in enumerate(self._rgba_idx):
             if ci < 0:
                 continue
@@ -194,25 +200,24 @@ class PLYReader:
                 out[i, 2] = fi[self._vertex_idx][2]
         return out
 
-    def triangles(self):
-        out = np.zeros((self.num_faces, 3, 3), dtype=np.float32)
-        for i, fi in enumerate(self.faces):
-            out[i, 0] = self.get_vertex_xyz(fi[self._vertex_idx][0])
-            out[i, 1] = self.get_vertex_xyz(fi[self._vertex_idx][1])
-            out[i, 2] = self.get_vertex_xyz(fi[self._vertex_idx][2])
-        return out
-
     def face_iter(self):
         for i in range(self.num_faces):
             vtex = self.faces[i][self._vertex_idx]
 
-            a = self.get_vertex_xyz(vtex[0])
-            b = self.get_vertex_xyz(vtex[1])
-            c = self.get_vertex_xyz(vtex[2])
-
+            
             rgba = self.get_rgba(i)
+            a = self.get_vertex_xyz(vtex[0])
 
-            yield a, b, c, rgba
+            # triangle fan
+            #   0 1 2 3 4 ...
+            # > 0 1 2
+            # > 0 2 3
+            # > 0 2 4
+            # ... 
+            for i in range(1, len(vtex)-1):
+                b = self.get_vertex_xyz(vtex[i])
+                c = self.get_vertex_xyz(vtex[i+1])
+                yield a, b, c, rgba
 
 
 # ply = PLYReader()
