@@ -152,3 +152,5 @@ taichiCourse01
 zoo
 hidden
 imgs/*.jpg
+imgs/*.npy
+hid_*.py

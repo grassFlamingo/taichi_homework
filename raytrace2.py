@@ -1,3 +1,4 @@
+import itertools
 import taichi as ti
 import Scene
 import numpy as np
@@ -15,24 +16,19 @@ image_height = int(image_width / aspect_ratio)
 canvas = ti.Vector.field(3, dtype=ti.f32, shape=(image_width, image_height))
 
 # Rendering parameters
-samples_per_pixel = 1
+samples_per_pixel = 8
 max_depth = 64
 
+
 @ti.kernel
-def render_01(camera: ti.template(), kn: ti.template()):
+def render_01(camera: ti.template()):
     # for i, j in itertools.product(range(image_width, image_height)):
     for i, j in canvas:
-        ccolor = canvas[i, j]
         u = (float(i) + ti.random()) / image_width
         v = (float(j) + ti.random()) / image_height
-        color = ti.Vector([0.0, 0.0, 0.0])
         ray = camera.get_ray(u, v)
-        for _ in ti.static(range(samples_per_pixel)):
-            color += ray_color_01(ray)
-        color /= samples_per_pixel
-
-        canvas[i, j] += kn * (color - ccolor)
-
+        color = ray_color_01(ray)
+        canvas[i, j] += color
 
 @ti.func
 def ray_color_01(ray: ti.template()):
@@ -44,18 +40,15 @@ def ray_color_01(ray: ti.template()):
 
 
 @ti.kernel
-def render(camera: ti.template(), kn: float):
+def render(camera: ti.template()):
     for i, j in canvas:
+        cc = ti.Vector([0.0,0.0,0.0])
         u = (float(i) + ti.random()) / image_width
         v = (float(j) + ti.random()) / image_height
-        color = ti.Vector([0.0, 0.0, 0.0])
         ray = camera.get_ray(u, v)
         for _ in range(samples_per_pixel):
-            color += ray_color(ray)
-        color /= samples_per_pixel
-
-        cc = canvas[i, j]
-        canvas[i, j] += kn * (color - cc)
+            cc += ray_color(ray)
+        canvas[i, j] += cc / samples_per_pixel 
 
 # return info
 # 0,      1,        2,         3,          4,        5,     6
@@ -86,18 +79,14 @@ def ray_color(ray):
             scattered_origin = hit_point
             brightness *= color
         elif material == Scene.M_metal or material == Scene.M_fuzzy_metal:
-            fuzz = 0.0
-            if material == Scene.M_fuzzy_metal:
-                fuzz = 0.4
-
             scattered_origin = hit_point
-            scattered_direction = Scene.reflect(
-                scattered_direction.normalized(), hit_normal) + fuzz * Scene.random_unit_vector()
+            scattered_direction = Scene.reflect(scattered_direction.normalized(), hit_normal)
 
-            if scattered_direction.dot(hit_normal) < 0:
-                break
-            else:
-                brightness *= color
+            if material == Scene.M_fuzzy_metal:
+                scattered_direction += 0.4 * Scene.random_unit_vector()
+
+            # do not check normal vector
+            brightness *= color
         elif material == Scene.M_dielectric:
             refraction_ratio = 1.5
             if is_inside == 0:
@@ -123,47 +112,39 @@ def ray_color(ray):
 
 scene = Scene.Scene()
 
-scene.add_obj(
+scene.append(
     Scene.Box.new(
-        ti.Vector([1, 1, 1]),
-        ti.Vector([1, 1, 1]),
-        Scene.M_diffuse,
-        [ti.Vector(np.random.rand(3) * 0.8 + 0.1) for _ in range(6)]
+        ti.Vector([0, 5, 2]),
+        ti.Vector([5, 0.2, 3]),
+        Scene.M_metal,
+        ti.Vector([0.2, 0.8, 0.5]),
     )
 )
 
-scene.add_obj(
+scene.append(
     Scene.Sphere(
-        ti.Vector([0, 0, 0]),
-        0.1,
-        Scene.M_diffuse,
-        ti.Vector([0.9, 0.9, 0.9]),
+        ti.Vector([1, -1, 7]),
+        1.0,
+        Scene.M_light_source,
+        ti.Vector([10.0, 10.0, 10.0])
     )
 )
 
-scene.add_obj(
-    Scene.Sphere(
-        ti.Vector([0, 1, 0]),
-        0.1,
-        Scene.M_diffuse,
-        ti.Vector([0.9, 0.0, 0.9]),
-    )
-)
+# ssoup = Scene.SphereSoup(8*8*8)
 
-scene.add_obj(
-    Scene.Sphere(
-        ti.Vector([0, 0, 1]),
-        0.1,
-        Scene.M_diffuse,
-        ti.Vector([0.9, 0.9, 0.0]),
-    )
-)
+# for i, j, k in itertools.product(range(8), range(8), range(8)):
+#     ssoup.append(ti.Vector([i-4, j-4, k-4]), 0.1, Scene.M_metal,
+#                  ti.Vector(np.random.rand(3) * 0.8 + 0.1))
+
+# scene.append(ssoup, "sphere soup")
 
 ply = PLYReader()
-ply.read_ply("./hidden/tree2.ply")
+ply.read_ply("./hidden/tree.ply")
 # ply.read_ply("./hidden/teamugblend.ply")
 
 soup = Scene.TriangleSoup(ply.num_triangles, Scene.M_diffuse)
+
+cweig = np.array([0.5, 0.9, 0.6])
 
 for a, b, c, rgba in ply.face_iter():
     # print(a, b, c, rgba)
@@ -172,21 +153,21 @@ for a, b, c, rgba in ply.face_iter():
         ti.Vector(b),
         ti.Vector(c),
         # color=ti.Vector([rgba[0], rgba[1], rgba[2]]))
-        color=ti.Vector(np.random.rand(3) * 0.8 + 0.2))
+        color=ti.Vector(np.random.rand(3) * cweig))
 
-scene.add_obj(soup, "tree")
+scene.append(soup, "tree")
 
 canvas.fill(0)
 
 camera = Scene.Camera()
-camera.set_look_from(13.0, 0.5, 6.5)
-camera.set_look_at(1.5, 0.5, 1.0)
+camera.set_look_from(10.0, 0.0, 8.0)
+camera.set_look_at(0.0, 0.0, 1.5)
 camera.reset()
 
 gui = ti.GUI("ray tracing", res=(image_width, image_height))
 # gui.fps_limit = 3
 delta = 0.5
-cnt = 0.0
+cnt = 0
 while gui.running:
     for e in gui.get_events(ti.GUI.PRESS):
         ax, ay, az = camera.look_at()
@@ -224,12 +205,11 @@ while gui.running:
         cnt = 0.0
         print("look form", camera.look_from(), "look at", camera.look_at())
 
-    cnt += 1.0
-    render_01(camera, 1.0 / cnt)
-    gui.set_image(np.sqrt(canvas.to_numpy()))
+    cnt += 1
+    render(camera)
+    gui.set_image(np.sqrt(canvas.to_numpy() / cnt))
 
-    gui.show()
-    # if cnt == 20.0:
-    #     gui.show("imgs/raytrace-%d.jpg" % cnt)
-    # else:
-    #     gui.show()
+    if cnt % 20 == 0:
+        gui.show("imgs/raytrace-%d.jpg" % cnt)
+    else:
+        gui.show()

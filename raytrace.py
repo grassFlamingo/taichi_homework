@@ -114,7 +114,7 @@ def ray_color(ray):
 
 scene = Scene.Scene()
 
-scene.add_obj(
+scene.append(
     Scene.Box.new(
         ti.Vector([4, 4, 4]),
         ti.Vector([8.0, 8.0, 8.0]),
@@ -130,7 +130,7 @@ scene.add_obj(
 # for i in range(8):
 #     bi = bin(i+8) # 0b1000 -> 0b1111
 #     veci = [float(bi[3]), float(bi[4]), float(bi[5])]
-#     scene.add_obj(
+#     scene.append(
 #         Scene.Sphere(
 #             ti.Vector(veci),
 #             0.1,
@@ -140,7 +140,7 @@ scene.add_obj(
 #         "ball%d"%i
 #     )
 
-# scene.add_obj(
+# scene.append(
 #     Scene.Plane(
 #         ti.Vector([0.0, 0.0, 0.0]),
 #         ti.Vector([1.0, 0.0, 0.0]),
@@ -149,7 +149,7 @@ scene.add_obj(
 #     )
 # )
 
-# scene.add_obj(
+# scene.append(
 #     Scene.Parallelogram(
 #         ti.Vector([0.5, 0.5, 0.5]),
 #         ti.Vector([0.5, 0.0, 0.2]),
@@ -160,7 +160,7 @@ scene.add_obj(
 #     "parallelogram"
 # )
 
-# scene.add_obj(
+# scene.append(
 #     Scene.Triangle(
 #         ti.Vector([-0.3, 0.2, 0.7]),
 #         ti.Vector([-0.3, 0.0, 0.7]),
@@ -171,7 +171,7 @@ scene.add_obj(
 #     "trangle"
 # )
 
-scene.add_obj(
+scene.append(
     Scene.Sphere(
         ti.Vector([4.0, 4.0, 7.0]),
         1.0,
@@ -181,7 +181,7 @@ scene.add_obj(
     "source"
 )
 
-scene.add_obj(
+scene.append(
     Scene.Sphere(
         ti.Vector([5.0, 5.0, 2.0]),
         2.0,
@@ -191,7 +191,7 @@ scene.add_obj(
     "grass"
 )
 
-scene.add_obj(
+scene.append(
     Scene.Box.new(
         ti.Vector([2.0, 2.0, 1.0]),
         ti.Vector([1.0, 1.0, 1.0]),

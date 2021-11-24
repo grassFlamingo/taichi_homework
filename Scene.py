@@ -63,6 +63,67 @@ def reflectance(cosine, ref_idx):
     return r0 + (1 - r0) * pow((1 - cosine), 5)
 
 
+@ti.func
+def _sphere_hit(x, r, ray, time_max=1e+8):
+    """ray sphere intersection.
+    refernece:
+    Fundamentals of Computer Graphics 4-th Edition, Chapter 4, section 4.4.1; page 76
+    """
+    is_hit = 0
+    hit_time = time_max
+    hit_point = ti.Vector([0.0, 0.0, 0.0])
+    hit_normal = ti.Vector([0.0, 1.0, 0.0])
+    is_inside = 0
+
+    # the direction of ray is normed to 1
+    oc = ray.origin - x
+
+    doc = ray.direction.dot(oc)
+
+    t = doc * doc - (oc.dot(oc) - r * r)
+    # t < 0: no intersection
+    if t >= 0:  # have intersection
+        _t = ti.sqrt(t)
+        if _t < hit_time:
+            # - doc +/- sqrt(t)
+            t1 = -doc + _t
+            t2 = -doc - _t
+
+            if t1 < 0:
+                if t2 > 0:
+                    # ray is inside this sphere
+                    # ( <-- t1 - O-> --- t2 ---> )
+                    is_hit = 1
+                    hit_time = t2
+                    is_inside = 1
+                # else:  # no solution
+                #     # ( <--t2-- ) <-- t1 -- O->
+                #     print("no solution", t1, t2)
+            else:
+                if t2 > 0:
+                    # O-> -- t1 -->( --- t2 --> )
+                    # O-> -- t2 -->( --- t1 --> )
+                    is_hit = 1
+                    hit_time = ti.min(t1, t2)
+                else:
+                    # ray is inside this sphere
+                    # ( <-- t2 -- O-> -- t1 --> )
+                    is_hit = 1
+                    is_inside = 1
+                    hit_time = t2
+
+    # compute normal
+    if is_hit == 1:
+        hit_point = ray.at(hit_time)
+        if is_inside:
+            # normal vector is oppositive
+            hit_normal = (x - hit_point) / r
+        else:
+            hit_normal = (hit_point - x) / r
+
+    return is_hit, hit_time, hit_point, hit_normal, is_inside
+
+
 M_unknown = 0
 M_light_source = 1
 M_metal = 2
@@ -88,6 +149,7 @@ class Ray:
     def __str__(self) -> str:
         return f"Ray(start={self.origin}, dir={self.direction})"
 
+
 @ti.data_oriented
 class Sphere:
     """A Sphere
@@ -106,57 +168,8 @@ class Sphere:
         refernece:
         Fundamentals of Computer Graphics 4-th Edition, Chapter 4, section 4.4.1; page 76
         """
-        is_hit = 0
-        hit_time = time_max
-        hit_point = ti.Vector([0.0, 0.0, 0.0])
-        hit_normal = ti.Vector([0.0, 1.0, 0.0])
-        is_inside = 0
-
-        # the direction of ray is normed to 1
-        oc = ray.origin - self.center
-
-        doc = ray.direction.dot(oc)
-
-        t = doc * doc - (oc.dot(oc) - self.radius * self.radius)
-        # t < 0: no intersection
-        if t >= 0:  # have intersection
-            _t = ti.sqrt(t)
-            if _t < hit_time:
-                # - doc +/- sqrt(t)
-                t1 = -doc + _t
-                t2 = -doc - _t
-
-                if t1 < 0:
-                    if t2 > 0:
-                        # ray is inside this sphere
-                        # ( <-- t1 - O-> --- t2 ---> )
-                        is_hit = 1
-                        hit_time = t2
-                        is_inside = 1
-                    # else:  # no solution
-                    #     # ( <--t2-- ) <-- t1 -- O->
-                    #     print("no solution", t1, t2)
-                else:
-                    if t2 > 0:
-                        # O-> -- t1 -->( --- t2 --> )
-                        # O-> -- t2 -->( --- t1 --> )
-                        is_hit = 1
-                        hit_time = ti.min(t1, t2)
-                    else:
-                        # ray is inside this sphere
-                        # ( <-- t2 -- O-> -- t1 --> )
-                        is_hit = 1
-                        is_inside = 1
-                        hit_time = t2
-
-        # compute normal
-        if is_hit == 1:
-            hit_point = ray.at(hit_time)
-            if is_inside:
-                # normal vector is oppositive
-                hit_normal = (self.center - hit_point) / self.radius
-            else:
-                hit_normal = (hit_point - self.center) / self.radius
+        is_hit, hit_time, hit_point, hit_normal, is_inside = _sphere_hit(
+            self.center, self.radius, ray, time_max)
 
         return is_hit, hit_time, hit_point, hit_normal, self.material, self.color, is_inside
 
@@ -203,6 +216,41 @@ class Plane:
         return "Plane()"
 
 
+@ti.func
+def ti_parallelogram_init(a, x, b):
+    """
+    ```
+       a
+      /
+     /
+    x --- b
+    ```
+    """
+    ax = a - x
+    bx = b - x
+    normal = bx.cross(ax)
+    area = normal.norm()  # what is the norm is 0?
+    normal = normal / area
+
+    # | i     j     k     |
+    # | ax[0] ax[1] ax[2] |
+    # | bx[0] bx[1] bx[2] |
+    # try to compute its 2D determinant
+
+    det = ax[1] * bx[2] - ax[2] * bx[1]
+    detidx = 0
+    if ti.abs(det) < 1e-8:
+        # previous det is too small; try another one
+        det = ax[0] * bx[2] - ax[2] * bx[0]
+        detidx = 1
+
+    if ti.abs(det) < 1e-8:
+        # previous dets are too small; try another one
+        det = ax[0] * bx[1] - ax[1] * bx[0]
+        detidx = 2
+
+    return ax, bx, normal, area, detidx, 1.0 / det
+
 
 def _parallelogram_init(a, x, b):
     """
@@ -241,6 +289,7 @@ def _parallelogram_init(a, x, b):
 
     return ax, bx, normal, area, detidx, 1.0 / det
 
+
 @ti.func
 def _parallelogram_alpha_beta(px, ax, bx, idetidx, idet):
     """
@@ -275,17 +324,18 @@ def _parallelogram_alpha_beta(px, ax, bx, idetidx, idet):
 
     alpha, beta = -1.0, -1.0
 
-    if idetidx == 0: # a1 a2 | b1 b2
+    if idetidx == 0:  # a1 a2 | b1 b2
         alpha = px[1] * bx[2] - px[2] * bx[1]
-        beta = px[2] * ax[1] - px[1] * ax[2] 
-    elif idetidx == 1: # a0 a2 | b0 b2
+        beta = px[2] * ax[1] - px[1] * ax[2]
+    elif idetidx == 1:  # a0 a2 | b0 b2
         alpha = px[0] * bx[2] - px[2] * bx[0]
-        beta = px[2] * ax[0] - px[0] * ax[2] 
+        beta = px[2] * ax[0] - px[0] * ax[2]
     else:  # 2 a0 a1 | b0 b1
         alpha = px[0] * bx[1] - px[1] * bx[0]
-        beta = px[1] * ax[0] - px[0] * ax[1] 
+        beta = px[1] * ax[0] - px[0] * ax[1]
 
     return alpha * idet, beta * idet
+
 
 @ti.data_oriented
 class Parallelogram:
@@ -386,6 +436,7 @@ class Triangle(Parallelogram):
     def __str__(self) -> str:
         return f"Trangle(a={self.ax + self.x}, x={self.x}, b={self.bx + self.x}, normal={self.normal}, det={self.idet:.4f}, detidx={self.idetidx:.4f})"
 
+
 @ti.data_oriented
 class TriangleSoup:
     """
@@ -411,7 +462,7 @@ class TriangleSoup:
         else:
             self.color = color
 
-        self.idx = 0
+        self.face_count = 0
 
     def append(self, a, x, b, material=None, color=None):
         if material is None:
@@ -421,18 +472,18 @@ class TriangleSoup:
 
         info = _parallelogram_init(a, x, b)
 
-        self.faces[self.idx].x = x
-        self.faces[self.idx].ax = info[0]
-        self.faces[self.idx].bx = info[1]
-        self.faces[self.idx].n = info[2]
-        self.faces[self.idx].area = info[3]
-        self.faces[self.idx].idetidx = info[4]
-        self.faces[self.idx].idet = info[5]
-        self.faces[self.idx].material = material
-        self.faces[self.idx].color = color
+        self.faces[self.face_count].x = x
+        self.faces[self.face_count].ax = info[0]
+        self.faces[self.face_count].bx = info[1]
+        self.faces[self.face_count].n = info[2]
+        self.faces[self.face_count].area = info[3]
+        self.faces[self.face_count].idetidx = info[4]
+        self.faces[self.face_count].idet = info[5]
+        self.faces[self.face_count].material = material
+        self.faces[self.face_count].color = color
 
-        self.idx += 1
-    
+        self.face_count += 1
+
     @ti.func
     def _check_ab(self, alpha, beta):
         ans = 1
@@ -450,7 +501,7 @@ class TriangleSoup:
         material = 0
         color = self.color
 
-        for idx in range(self.idx):
+        for idx in range(self.face_count):
             item = self.faces[idx]
 
             if ray.direction.dot(item.n) < 0:
@@ -475,23 +526,141 @@ class TriangleSoup:
                     color = item.color
 
         return is_hit, hit_time, hit_point, hit_normal, material, color, is_inside
-    
+
     def __str__(self) -> str:
         items = []
-        for i in range(self.idx):
+        for i in range(self.face_count):
             fi = self.faces[i]
-            items.append(f"x={fi.x}, ax={fi.ax}, bx={fi.bx}, n={fi.n}, material={fi.material}, color={fi.color}")
+            items.append(
+                f"x={fi.x}, ax={fi.ax}, bx={fi.bx}, n={fi.n}, material={fi.material}, color={fi.color}")
         items = "\n  ".join(items)
         return f"""{self.__class__.__name__}(\n  {items})"""
+
+# @ti.data_oriented
+# class TriangleSoupVE:
+#     """
+#     a bunch of triangles in vertex and triangle mode
+#     sorry not implement yet (O_O) =>
+#     """
+#     def __init__(self, num_vertex, num_faces, material, color=None) -> None:
+#         self.num_vertex = num_vertex
+#         self.num_faces = num_faces
+#         self.faces = ti.Struct.field({
+#             "a": ti.f32,
+#             "x": ti.f32,
+#             "b": ti.f32,
+#             "n": ti.types.vector(3, ti.f32),
+#             "area": ti.f32,
+#             "idetidx": ti.i32,
+#             "idet": ti.f32,
+#             "material": ti.i32,
+#             "color": ti.types.vector(3, ti.f32),
+#         }, num_faces)
+
+#         self.vertex = ti.Vector.field(3, ti.f32, num_vertex)
+
+#         self.material = material
+#         if color is None:
+#             self.color = ti.Vector([1.0, 1.0, 1.0])
+#         else:
+#             self.color = color
+
+#         self.face_count = 0
+#         self.vertex_count = 0
+
+#     def append_vertex(self, x):
+#         if self.vertex_count >= self.num_vertex:
+#             print("too many vertex")
+#             return
+#         self.vertex[self.vertex_count] = x
+#         self.vertex_count += 1
+
+#     def append_face(self, ia, ix, ib, material=None, color=None):
+#         """
+#         - ia, ix, ib are three indexes!!!
+#         """
+#         if self.face_count >= self.num_faces:
+#             print("too many faces")
+#             return
+#         if material is None:
+#             material = self.material
+#         if color is None:
+#             color = self.color
+#         a = self.vertex[ia]
+#         x = self.vertex[ix]
+#         b = self.vertex[ib]
+
+#         info = _parallelogram_init(a, x, b)
+
+#         self.faces[self.face_count].x = ix
+#         self.faces[self.face_count].a = ia
+#         self.faces[self.face_count].b = ib
+#         self.faces[self.face_count].n = info[2]
+#         self.faces[self.face_count].area = info[3]
+#         self.faces[self.face_count].idetidx = info[4]
+#         self.faces[self.face_count].idet = info[5]
+#         self.faces[self.face_count].material = material
+#         self.faces[self.face_count].color = color
+
+#         self.face_count += 1
+
+#     @ti.func
+#     def _check_ab(self, alpha, beta):
+#         ans = 1
+#         if alpha < 0.0 or beta < 0.0 or alpha + beta > 1.0:
+#             ans = 0
+#         return ans
+
+#     @ti.func
+#     def hit(self, ray, time_max=1e+8):
+#         is_hit = 0
+#         hit_time = time_max
+#         hit_point = ti.Vector([0.0, 0.0, 0.0])
+#         hit_normal = ti.Vector([0.0, 1.0, 0.0])
+#         is_inside = 0
+#         material = 0
+#         color = self.color
+
+#         for idx in range(self.face_count):
+#             item = self.faces[idx]
+
+#             if ray.direction.dot(item.n) < 0:
+#                 # ray hit plane
+#                 x = self.vertex[item.x]
+#                 a = self.vertex[item.a]
+#                 b = self.vertex[item.b]
+
+#                 t = item.n.dot(x - ray.origin) / item.n.dot(ray.direction)
+
+#                 if t <= 0 or t > hit_time:
+#                     continue
+
+#                 p = ray.at(t)
+
+#                 alpha, beta = _parallelogram_alpha_beta(
+#                     p - x, a - x, b - x, item.idetidx, item.idet)
+
+#                 if self._check_ab(alpha, beta):
+#                     # in the triangle | paralleogram
+#                     is_hit = 1
+#                     hit_time = t
+#                     hit_point = p
+#                     hit_normal = item.n
+#                     material = item.material
+#                     color = item.color
+
+#         return is_hit, hit_time, hit_point, hit_normal, material, color, is_inside
+
 
 @ti.data_oriented
 class ParallelogramSoup(TriangleSoup):
     """
     a bunch of parallelograms
     """
+
     def __init__(self, count, material=M_unknown, color=None) -> None:
         super().__init__(count, material, color)
-    
+
     # only need to rewrite this function
     @ti.func
     def _check_ab(self, alpha, beta):
@@ -499,6 +668,7 @@ class ParallelogramSoup(TriangleSoup):
         if alpha < 0.0 or beta < 0.0 or alpha > 1.0 or beta > 1.0:
             ans = 0
         return ans
+
 
 @ti.data_oriented
 class Box(ParallelogramSoup):
@@ -532,6 +702,7 @@ class Box(ParallelogramSoup):
     else:
         all normal vectors are point inside
     """
+
     def __init__(self, a, x, b, c, material, color, normal_out=True) -> None:
         super().__init__(6)
         # self.volume = ti.abs((a - x).dot((b-x).cross((c-x))))
@@ -583,16 +754,91 @@ class Box(ParallelogramSoup):
 
         return Box(a, x, b, c, material, color, normal_out)
 
+
+@ti.data_oriented
+class SphereSoup:
+    def __init__(self, count, material=M_diffuse, color=None) -> None:
+        if color is None:
+            color = ti.Vector([1.0, 1.0, 1.0])
+
+        self.num_sphere = count
+
+        self.spheres = ti.Struct.field({
+            "x": ti.types.vector(3, ti.f32),
+            "r": ti.f32,
+            "material": ti.i32,
+            "color": ti.types.vector(3, ti.f32),
+        }, count)
+
+        self.scount = 0
+        self.material = material
+        self.color = color
+
+    def append(self, x, r, material=None, color=None):
+        if self.scount >= self.num_sphere:
+            print("too much spere")
+            return
+
+        if material is None:
+            material = self.material
+        if color is None:
+            color = self.color
+
+        self.spheres[self.scount].x = x
+        self.spheres[self.scount].r = r
+        self.spheres[self.scount].material = material
+        self.spheres[self.scount].color = color
+
+        self.scount += 1
+
+    @ti.func
+    def hit(self, ray, time_max=1e+8):
+        is_hit = 0
+        hit_time = time_max
+        hit_point = ti.Vector([0.0, 0.0, 0.0])
+        hit_normal = ti.Vector([0.0, 1.0, 0.0])
+        is_inside = 0
+        material = 0
+        color = self.color
+
+        for idx in range(self.scount):
+            item = self.spheres[idx]
+
+            info = _sphere_hit(item.x, item.r, ray, hit_time)
+            # is_hit, hit_time, hit_point, hit_normal, is_inside
+
+            if info[0] == 0 or info[1] > hit_time:
+                continue 
+            is_hit = info[0]
+            hit_time = info[1]
+            hit_point = info[2]
+            hit_normal = info[3]
+            is_inside = info[4]
+            material = item.material
+            color = item.color
+
+        return is_hit, hit_time, hit_point, hit_normal, material, color, is_inside
+
+    def __str__(self) -> str:
+        items = []
+        for i in range(self.face_count):
+            fi = self.faces[i]
+            items.append(
+                f"x={fi.x}, ax={fi.ax}, bx={fi.bx}, n={fi.n}, material={fi.material}, color={fi.color}")
+        items = "\n  ".join(items)
+        return f"""{self.__class__.__name__}(\n  {items})"""
+
+
 @ti.data_oriented
 class Scene:
     def __init__(self):
         self.objList = []
         self.objName = []
 
-    def add_obj(self, obj, name=None):
+    def append(self, obj, name=None):
         if name is None:
             name = "obj%d" % len(self.objList)
-        print(name, obj)
+        # print(name, obj)
         new_name = True
         for i, n in enumerate(self.objName):
             if n != name:
