@@ -147,6 +147,7 @@ cython_debug/
 --Deformables
 taichi_ray_tracing
 taichiCourse01
+taichi_sph
 .vscode
 
 zoo
