@@ -125,7 +125,7 @@ class PLYReader:
 
                     _raw = ply.read(_len * _dsize)
 
-                    # TRYANGLE_FAN
+                    # TRIANGLE_FAN
 
                     item.append(
                         np.frombuffer(_raw, dtype=np.dtype(d[4:7]), count=_len)
@@ -139,8 +139,33 @@ class PLYReader:
                     )
             dst.append(item)
 
-    def _read_ascii(self, ply, meta, dst, count):
-        raise NotImplementedError()
+    def _read_ascii(self, ply, meta: list, dst: list, count: int):
+        for i in range(count):
+            line = ply.readline().decode().split()
+            # meta has (name, dtype| bytes)
+            item = []
+            j = 0
+            for _, d in meta:
+                if d[0] == 'l': # list
+                    # lu1i4
+                    # 01234
+                    _len = int(line[j])
+                    # read _len items
+                    j += 1
+                    if d[3] == "i" or d[3] == 'u':
+                        _faces = [int(line[j+_k]) for _k in range(_len)]
+                    else:
+                        _faces = [float(line[j+_k]) for _k in range(_len)]
+                    j += _len
+                    item.append(np.asarray(_faces, dtype=np.dtype(d[3:5])))
+                elif d[0] == 'i' or d[0] == 'u':
+                    item.append(int(line[j]))
+                    j+=1
+                else:
+                    # just numbers
+                    item.append(float(line[j]))
+                    j+=1
+            dst.append(item)
 
     def vertex_tags(self):
         return [t[0] for t in self.meta_vertex]
@@ -204,7 +229,6 @@ class PLYReader:
         for i in range(self.num_faces):
             vtex = self.faces[i][self._vertex_idx]
 
-            
             rgba = self.get_rgba(i)
             a = self.get_vertex_xyz(vtex[0])
 
@@ -219,9 +243,3 @@ class PLYReader:
                 c = self.get_vertex_xyz(vtex[i+1])
                 yield a, b, c, rgba
 
-
-# ply = PLYReader()
-# ply.read_ply("./hidden/Lowpoly_tree_sample.ply")
-# for v in ply.triangles():
-    # print(v)
-# print(ply.faces)
