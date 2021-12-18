@@ -390,6 +390,7 @@ class OCTTree:
         self.root = None
         self.centers = ti.Vector.field(3, ti.f32, count)
         self._compute_triangles_center()
+        self.tcmm = ti.Vector.field(3, ti.f32, 3)
 
     def build_tree(self):
         if self.count <= 0:
@@ -467,17 +468,21 @@ class OCTTree:
             a = di.ax + x  # ax = a - x
             b = di.bx + x  # bx = b - x
 
-            for j in ti.static(range(3)):
-                _m1 = min(a[j], b[j], x[j])
-                _m2 = max(a[j], b[j], x[j])
-                self.centers[i][j] = (_m1 + _m2) / 2.0
+            self.centers[i] = (x + a + b) / 3.0
+
+            # for j in ti.static(range(3)):
+            #     _m1 = min(a[j], b[j], x[j])
+            #     _m2 = max(a[j], b[j], x[j])
+            #     self.centers[i][j] = (_m1 + _m2) / 2.0
 
     @ti.kernel
-    def _compute_box(self, _L: ti.i32, _R: ti.i32, cmm: ti.any_arr()):
+    def _compute_box(self, _L: ti.i32, _R: ti.i32):
         # init
         for j in ti.static(range(3)):
-            cmm[0, j] = self.triangles[_L].x[j]
-            cmm[1, j] = self.triangles[_L].x[j]
+            self.tcmm[0][j] = self.triangles[_L].x[j]
+            self.tcmm[1][j] = self.triangles[_L].x[j]
+            self.tcmm[2][j] = 0
+        
 
         for i in range(_L, _R):
             di = self.triangles[i]
@@ -485,65 +490,55 @@ class OCTTree:
             a = di.ax + x  # ax = a - x
             b = di.bx + x  # bx - b - x
 
-            for j in ti.static(range(3)):
-                _t = min(x[j], a[j], b[j])
-                ti.atomic_min(cmm[0, j], _t)
-                _t = max(x[j], a[j], b[j])
-                ti.atomic_max(cmm[1, j], _t)
+            self.tcmm[2] += self.centers[i]
 
-        for j in ti.static(range(3)):
-            cmm[2, j] = (cmm[0, j] + cmm[1, j]) / 2.0
+            for j in ti.static(range(3)):
+                ti.atomic_min(self.tcmm[0][j], min(x[j], a[j], b[j]))
+                ti.atomic_max(self.tcmm[1][j], max(x[j], a[j], b[j]))
+
+        if _R > _L:
+            self.tcmm[2] /= (_R - _L)
 
     def _split_oct(self, left: int, right: int):
         # print("_split_oct", left, right)
+        # (left, right]
 
-        if left > right:
+        if left >= right:
             return None
 
         tnode = self.TreeNode(left, right)
-        cmm = ti.ndarray(ti.f32, shape=(3, 3))
-        self._compute_box(left, right, cmm)
+        self._compute_box(left, right)
+        cmm = self.tcmm.to_numpy()
 
         tnode.cmin = cmm[0]
         tnode.cmax = cmm[1]
         center = cmm[2]
 
         if right - left < 8:
-            for i in range(right - left):
+            for i in range(left, right):
                 # negative is the index of triangle
-                tnode.set_childs(i, self.TreeNode(left + i))
+                tnode.set_childs(i-left, self.TreeNode(i))
             return tnode
-
-        axis_i = [(cmm[2, 0], 0), (cmm[2, 1], 1), (cmm[2, 2], 2)]
-        axis_i.sort(key=lambda x: x[0], reverse=True)
 
         # try to split
         # left -- l1 -- l2 -- l3 -- l4 -- l5 -- l6 -- l7 -- right
 
         # left -------------------- l4 -------------------- right
-        _v, _i = axis_i[0]
+        _v, _i = center[0], 0
         l4 = self._sort_triangles(_v, left, right, _i)
-        # balance rsult
-        l4 = max(left + 4, l4)
 
         # left -------- l2 -------- l4 --------- l6 -------- right
-        _v, _i = axis_i[1]
+        _v, _i = center[1], 1
         l2 = self._sort_triangles(_v, left, l4, _i)
-        l2 = max(left + 2, l2)
         l6 = self._sort_triangles(_v, l4, right, _i)
-        l6 = max(l4 + 2, l6)
 
         # left -- l1 -- l2 -- l3 -- l4 -- l5 -- l6 -- l7 -- right
         # left --    -- l2 --    -- l4 --    -- l6 --    -- right
-        _v, _i = axis_i[2]
+        _v, _i = center[2], 2
         l1 = self._sort_triangles(_v, left, l2, _i)
-        l1 = max(left + 1, l1)
         l3 = self._sort_triangles(_v, l2, l4, _i)
-        l3 = max(l2 + 1, l3)
         l5 = self._sort_triangles(_v, l4, l6, _i)
-        l5 = max(l4 + 1, l5)
         l7 = self._sort_triangles(_v, l6, right, _i)
-        l7 = max(l6 + 1, l7)
 
         spoint = [left, l1, l2, l3, l4, l5, l6, l7, right]
         # print(spoint)
@@ -552,7 +547,6 @@ class OCTTree:
                 continue
             else:
                 tnode.set_childs(i, self._split_oct(l, r))
-
         return tnode
 
     @ti.kernel
@@ -572,10 +566,10 @@ class OCTTree:
         # similar to quick sort
         i, j = left, right - 1
         while i < j:
-            while self.centers[j][axis] >= x and i < j:
+            while self.centers[j][axis] > x and i < j:
                 j -= 1
                 # upper move left
-            while self.centers[i][axis] <= x and i < j:
+            while self.centers[i][axis] < x and i < j:
                 i += 1
                 # lower move right
 
@@ -616,21 +610,21 @@ class TriangleSoup:
         else:
             self.color = color
 
-        self.face_count = ti.field(ti.i32, ())
-        self.face_count[None] = 0
+        # num faces, num nodes
+        self.counts = ti.field(ti.i32, (2))
+        self.counts[0] = 0
+        self.counts[1] = 0
         self.octree = ti.Struct.field({
             "cmin": ti.types.vector(3, ti.f32),
             "cmax": ti.types.vector(3, ti.f32),
             "child": ti.types.vector(8, ti.i32),  # 8 nodes
         })
-        self.octlist = ti.field(ti.i32)
 
         if count > 64:
             count = int(math.ceil(count / 32))
 
         block = ti.root.pointer(ti.i, 32).dense(ti.i, count)
         block.place(self.octree)
-        block.place(self.octlist)
 
     def append(self, a, x, b, material=None, color=None):
         if material is None:
@@ -640,7 +634,7 @@ class TriangleSoup:
 
         info = _parallelogram_init(a, x, b)
 
-        i = self.face_count[None]
+        i = self.counts[0]
 
         if info[3] > 1e-12:
             # < 1e-12 not a triangle
@@ -653,16 +647,15 @@ class TriangleSoup:
             self.faces[i].material = material
             self.faces[i].color = color
 
-            self.face_count[None] += 1
+            self.counts[0] += 1
 
     def build_tree(self):
         print("start build tree")
-        octt = OCTTree(self.face_count[None], self.faces)
+        octt = OCTTree(self.counts[0], self.faces)
         octt.build_tree()
 
-        octt.nodes_to_taichi(self.octree)
-
-        # print(self.octree)
+        self.counts[1] = octt.nodes_to_taichi(self.octree)
+        
         del octt
         print("end build tree")
 
@@ -684,16 +677,17 @@ class TriangleSoup:
 
         # use oct tree
         oclist_tail = 0
-        self.octlist[oclist_tail] = 0
+        octlist = ti.field(ti.i32, self.counts[1])
+        octlist[oclist_tail] = 0
 
         while oclist_tail >= 0:
 
-            node = self.octree[self.octlist[oclist_tail]]
+            node = self.octree[octlist[oclist_tail]]
             oclist_tail -= 1
-            _hit, _time = ray_intersect_solid_box(
-                ray, node.cmin, node.cmax, time_min, time_max)
-            if _hit == 0:
-                continue
+            # _hit = ray_intersect_solid_box(
+            #     ray, node.cmin, node.cmax, time_min, time_max)
+            # if _hit == 0:
+            #     continue
             # print("oclist_tail", oclist_tail)
             # print("ray hit solid box", _hit, node.cmin, node.cmax)
             # enumerate 8 childs
@@ -705,13 +699,12 @@ class TriangleSoup:
                     # this is a solid box
                     # child is located at self.octree[_rci]
                     oclist_tail += 1
-                    self.octlist[oclist_tail] = _rci  # append to list
+                    octlist[oclist_tail] = _rci  # append to list
                 elif _rci < 0:  # this is a triangle
                     # _rci = -1 * (index + 1)
                     # => index = -1 * (_rci + 1)
-                    _tri_idx = -1 * (_rci + 1)
                     # do the triangle ray intersection
-                    item = self.faces[_tri_idx]
+                    item = self.faces[-1 * (_rci + 1)]
                     # print("hit item", item.x)
 
                     if ray.direction.dot(item.n) < 0:
@@ -736,9 +729,42 @@ class TriangleSoup:
 
         return is_hit, time_max, hit_point, hit_normal, material, color, is_inside
 
+    @ti.func
+    def ray_intersect_old(self, ray, time_min: float, time_max: float):
+        is_hit = 0
+        hit_point = ti.Vector([0.0, 0.0, 0.0])
+        hit_normal = ti.Vector([0.0, 1.0, 0.0])
+        is_inside = 0
+        material = 0
+        color = self.color
+
+        for i in range(self.counts[None]):
+            item = self.faces[i]
+            if ray.direction.dot(item.n) < 0:
+                # ray hit plane
+                t = item.n.dot(item.x - ray.origin) / \
+                    item.n.dot(ray.direction)
+
+                if t > time_min and t < time_max:
+                    p = ray.at(t)
+
+                    alpha, beta = _parallelogram_alpha_beta(
+                        p - item.x, item.ax, item.bx, item.idetidx, item.idet)
+
+                    if self._check_ab(alpha, beta):
+                        # in the triangle | paralleogram
+                        is_hit = 1
+                        time_max = t  # !! update 
+                        hit_point = p
+                        hit_normal = item.n
+                        material = item.material
+                        color = item.color
+
+        return is_hit, time_max, hit_point, hit_normal, material, color, is_inside
+
     def __str__(self) -> str:
         items = []
-        for i in range(self.face_count):
+        for i in range(self.counts[None]):
             fi = self.faces[i]
             items.append(
                 f"x={fi.x}, ax={fi.ax}, bx={fi.bx}, n={fi.n}, material={fi.material}, color={fi.color}")
