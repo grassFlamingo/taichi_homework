@@ -383,7 +383,6 @@ class KDTreeNode:
         self.mid = None
         self.right = None
 
-
 @ti.data_oriented
 class KDTree:
     """KD Tree; only works for TriangleSoup and ParallelogramSoup
@@ -393,14 +392,14 @@ class KDTree:
         self.count = count
         self.objs = faces
         self.root = None
-        # cmin, cmax, center
-        self.objboxes = ti.Vector.field(3, ti.f32, (count, 3))
+        # cmin, cmax
+        self.objboxes = ti.Vector.field(3, ti.f32, (count, 2))
         self._compute_obj_boxes()
 
     def build_tree(self):
         if self.count <= 0:
             return
-        self.root = self._split_kd([i for i in range(self.count)], 0, 1)
+        self.root = self._split_kd([i for i in range(self.count)], 0, 128)
 
     def flat_tree_to_taichi(self, kdflat, kdcmin, kdcmax):
         self._flat_tree_to_taichi(kdflat, kdcmin, kdcmax, 0, 0, self.root)
@@ -446,7 +445,6 @@ class KDTree:
 
         if root.items is None:  # have childs
             fadd += 3  # left right mid
-
             for i, child in enumerate([root.left, root.right, root.mid]):
                 kdflat[fidx + 1 + i] = fidx + fadd
                 _dxf, _dxc = self._flat_tree_to_taichi(
@@ -480,9 +478,6 @@ class KDTree:
                 self.objboxes[i, 0][j] = min(x[j], a[j], b[j])
                 self.objboxes[i, 1][j] = max(x[j], a[j], b[j])
 
-            self.objboxes[i, 2] = 0.5 * \
-                (self.objboxes[i, 0] + self.objboxes[i, 1])
-
     @ti.kernel
     def _compute_box(self, cmm: ti.any_arr(), indexes: ti.any_arr()):
         # cmm: cmin, cmax, center, size
@@ -506,7 +501,7 @@ class KDTree:
             cmm[2] = 0.5 * (cmm[0] + cmm[1])
             cmm[3] = abs(cmm[0] - cmm[1])
 
-    # @ti.kernel
+    @ti.kernel
     def _align_kd_box(
             self,
             dst: ti.any_arr(),
@@ -522,12 +517,12 @@ class KDTree:
 
         for i in objlist:
             # cmin, cmax, center
-            obox0 = self.objboxes[objlist[i], 0][axis]
-            obox1 = self.objboxes[objlist[i], 1][axis]
-            # for j in ti.static(range(3)):
-            #     if j == axis:
-            #         obox0 = self.objboxes[objlist[i], 0][j]
-            #         obox1 = self.objboxes[objlist[i], 1][j]
+            obox0 = 0.0
+            obox1 = 0.0
+            for j in ti.static(range(3)):
+                if j == axis:
+                    obox0 = self.objboxes[objlist[i], 0][j]
+                    obox1 = self.objboxes[objlist[i], 1][j]
             _t = 0
             if max(left, obox0) <= min(obox1, mx):
                 _t += 1
@@ -764,7 +759,6 @@ class TriangleSoup:
     @ti.func
     def ray_intersect(self, ray, time_min: float, time_max: float):
         is_hit = 0
-        hit_time = time_max
         hit_point = ti.Vector([0.0, 0.0, 0.0])
         hit_normal = ti.Vector([0.0, 1.0, 0.0])
         is_inside = 0
@@ -779,16 +773,15 @@ class TriangleSoup:
             mark = self.kdflat[idx+1]
             if mark < 0:  # triangles
                 flag = 0
-                info = self._iter_objects(ray, idx, time_min, hit_time)
-                if info[0] == 1 and info[1] > time_min and info[1] < hit_time:
+                info = self._iter_objects(ray, idx, time_min, time_max)
+                if info[0] == 1 and info[1] > time_min and info[1] < time_max:
                     is_hit = 1
-                    hit_time = info[1]
+                    time_max = info[1]
                     hit_point = info[2]
                     hit_normal = info[3]
                     material = info[4]
                     color = info[5]
                     is_inside = info[6]
-
             else:  # objects
                 _l = mark
                 _r = self.kdflat[idx+2]
@@ -801,10 +794,10 @@ class TriangleSoup:
                 _hitm, _ = ray_intersect_solid_box(ray, self.kdcmin[_mi], self.kdcmax[_mi], time_min, time_max)
                 if _hitm == 1:
                     # iter mid
-                    info = self._iter_objects(ray, _m, time_min, hit_time)
+                    info = self._iter_objects(ray, _m, time_min, time_max)
                     if info[0] == 1:
                         is_hit = 1
-                        hit_time = info[1]
+                        time_max = info[1]
                         hit_point = info[2]
                         hit_normal = info[3]
                         material = info[4]
@@ -825,7 +818,7 @@ class TriangleSoup:
                 else: # not hit 
                     flag = 0
 
-        return is_hit, hit_time, hit_point, hit_normal, material, color, is_inside
+        return is_hit, time_max, hit_point, hit_normal, material, color, is_inside
 
     def __str__(self) -> str:
         items = []
