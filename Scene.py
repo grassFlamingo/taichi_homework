@@ -1,3 +1,4 @@
+from numpy.core.defchararray import index
 import taichi as ti
 import numpy as np
 import math
@@ -366,149 +367,132 @@ def ray_intersect_solid_box(ray, cmin, cmax, time_min: float, time_max: float):
         is_hit = 1
     return is_hit, tmin
 
+
+@ti.func
+def solid_box_box_intersection(amin, amax, bmin, bmax):
+    ans = 1
+    for i in ti.static(range(3)):
+        if ans == 1 and max(amin[i], bmin[i]) > min(amax[i], bmax[i]):
+            ans = 0
+    return ans
+
+
+class KDTreeNode:
+    def __init__(self) -> None:
+        self.items = None
+        self.cmin = None
+        self.cmax = None
+        self.left = None
+        self.mid = None
+        self.right = None
+
 @ti.data_oriented
-class AABBTree:
-    """AABB Tree; only works for TriangleSoup and ParallelogramSoup
+class KDTree:
+    """KD Tree; only works for TriangleSoup and ParallelogramSoup
     """
-    class TreeNode:
-        def __init__(self, index = -1) -> None:
-            self.index = index
-            self.cmin = ti.Vector([0.0, 0.0, 0.0])
-            self.cmax = ti.Vector([0.0, 0.0, 0.0])
-            self.left = None
-            self.right = None
-        
-        def is_leaf(self):
-            return self.index >= 0
-        
-        def index_encode(self):
-            if self.index < 0:
-                return 0
-            else:
-                return -1*(self.index + 1)
 
     def __init__(self, count, faces) -> None:
         self.count = count
-        self.triangles = faces
+        self.objs = faces
         self.root = None
-        self.objcenters = ti.Vector.field(3, ti.f32, count)
-        self._compute_object_centers()
-        # temp, not safe!!; cmin, cmax, size, center
-        self.tcmm = ti.Vector.field(3, ti.f32, shape=(4,)) 
+        # cmin, cmax
+        self.objboxes = ti.Vector.field(3, ti.f32, (count, 2))
+        self._compute_obj_boxes()
 
     def build_tree(self):
         if self.count <= 0:
             return
-        self.root = self.split_aabb(0, self.count)
-    
+        self.root = self._split_kd([i for i in range(self.count)], 0, 128)
 
-    def dump_tree(self, root):
-        print("node", root.cmin, root.cmax)
+    def flat_tree_to_taichi(self, kdflat, kdcmin, kdcmax):
+        self._flat_tree_to_taichi(kdflat, kdcmin, kdcmax, 0, 0, self.root)
+        # kdcmin[0] = self.root.cmin
+        # kdcmax[0] = self.root.cmax
+        # kdflat[0] = 0
+        # kdflat[1] = -1
+        # kdflat[2] = self.count
+        # for i in range(self.count):
+        #     kdflat[3+i] = i
 
-        # if not root.left is None:
-
-
-    def nodes_count(self, root=None):
+    def _flat_tree_to_taichi(self, kdflat, kdcmin, kdcmax, fidx, cidx, root):
         if root is None:
-            if self.root is None:
-                return 0
-            else:
-                root = self.root
-        cnt = 1
-        if not root.left is None:
-            if root.left.is_leaf():
-                pass
-            else:
-                cnt += self.nodes_count(root.left)
-        if not root.right is None:
-            if root.right.is_leaf():
-                pass
-            else:
-                cnt += self.nodes_count(root.right)
-        return cnt
+            # write -1, 0 to kdflat
+            kdcmin[cidx] = ti.Vector([0.0, 0.0, 0.0])
+            kdcmax[cidx] = ti.Vector([0.0, 0.0, 0.0])
+            kdflat[fidx] = cidx
+            kdflat[fidx + 1] = -1
+            kdflat[fidx + 2] = 0
+            return 3, 1
 
-    def nodes_to_taichi(self, out):
-        """
-        size of out must >= self.nodes_count()
-        out is taichi struct
-        ```
-        {
-            "cmin": ti.types.vector(3, ti.f32), # corner min
-            "cmax": ti.types.vector(3, ti.f32), # corner max
-            "subn": ti.types.vector(2, ti.i32),
-        }
-        ```
-        subn: left/right
-        ```
-        > 0: index of next node 
-        = 0: no child 
-        < 0: -1*(index+1) of triangle
-        ```
-        depth first search order
-        """
-        if self.root is None:
-            return
-        self._nodes_to_taichi(self.root, out, 0)
-        # print(out)
+        # [kdflat]
+        # 0: corner index;
+        # 1: mark
+        # if mark >= 0:
+        #   1: left index
+        #   2: right index
+        #   3: mid index
+        # else:
+        #   2: data len (n)
+        #   3+0: triangle index 0
+        #   3+1: triangle index 1
+        #   ...: .....
+        #   3+n-1: triangle index n-1
+        #
+        # next block
 
+        kdcmin[cidx] = root.cmin
+        kdcmax[cidx] = root.cmax
+        kdflat[fidx] = cidx
 
-    def _nodes_to_taichi(self, root, out, idx):
-        if root is None:
-            return 0
+        fadd, cadd = 1, 1
 
-        # print("node", root.cmin, root.cmax)
-
-        out[idx].cmin = root.cmin
-        out[idx].cmax = root.cmax
-
-        n = 1
-
-        if root.left is None:
-            out[idx].subn[0] = 0
-        elif root.left.is_leaf():
-            out[idx].subn[0] = root.left.index_encode()
+        if root.items is None:  # have childs
+            fadd += 3  # left right mid
+            for i, child in enumerate([root.left, root.right, root.mid]):
+                kdflat[fidx + 1 + i] = fidx + fadd
+                _dxf, _dxc = self._flat_tree_to_taichi(
+                    kdflat, kdcmin, kdcmax, fidx + fadd, cidx + cadd, child)
+                fadd += _dxf
+                cadd += _dxc
         else:
-            out[idx].subn[0] = idx + n
-            n += self._nodes_to_taichi(root.left, out, idx + n)
+            # write to kdflat
+            # left index set to self; no more left node
+            kdflat[fidx + fadd] = -1
+            fadd += 1
+            # data length
+            kdflat[fidx + fadd] = len(root.items)
+            fadd += 1
+            for i in root.items:
+                kdflat[fidx + fadd] = i
+                fadd += 1
 
-        if root.right is None:
-            out[idx].subn[1] = 0
-        elif root.left.is_leaf():
-            out[idx].subn[1] = root.right.index_encode()
-        else:
-            out[idx].subn[1] = idx + n
-            n += self._nodes_to_taichi(root.right, out, idx + n)
-        # now many nodes written
-        return n
+        return fadd, cadd
 
     @ti.kernel
-    def _compute_object_centers(self):
+    def _compute_obj_boxes(self):
         # num faces is self.count <- static alert
         for i in range(self.count):
-            fi = self.triangles[i]
-            x = fi.x
-            a = fi.ax + x  # ax = a - x
-            b = fi.bx + x  # bx = b - x
+            di = self.objs[i]
+            x = di.x
+            a = di.ax + x  # ax = a - x
+            b = di.bx + x  # bx = b - x
 
             for j in ti.static(range(3)):
-                _cmin = min(x[j], a[j], b[j])
-                _cmax = max(x[j], a[j], b[j])
-
-                self.objcenters[i][j] = 0.5 * (_cmin + _cmax)
+                self.objboxes[i, 0][j] = min(x[j], a[j], b[j])
+                self.objboxes[i, 1][j] = max(x[j], a[j], b[j])
 
     @ti.kernel
-    def _compute_box(self, _L: ti.i32, _R: ti.i32):
+    def _compute_box(self, cmm: ti.any_arr(), indexes: ti.any_arr()):
+        # cmm: cmin, cmax, center, size
+
         # init
         for j in ti.static(range(3)):
-            self.tcmm[0][j] = self.triangles[_L].x[j]
-            self.tcmm[1][j] = self.triangles[_L].x[j]
-            self.tcmm[3][j] = 0.0
-        
-        ccmin = ti.Vector([0.0, 0.0, 0.0])
-        ccmax = ti.Vector([0.0, 0.0, 0.0])
+            cmm[0][j] = self.objs[indexes[0]].x[j]
+            cmm[1][j] = self.objs[indexes[0]].x[j]
 
-        for i in range(_L, _R):
-            di = self.triangles[i]
+        for i in indexes:
+            ii = indexes[i]
+            di = self.objs[ii]
             x = di.x
             a = di.ax + x  # ax = a - x
             b = di.bx + x  # bx - b - x
@@ -516,87 +500,109 @@ class AABBTree:
             self.tcmm[3] += self.objcenters[i]
 
             for j in ti.static(range(3)):
-                _t = min(x[j], a[j], b[j])
-                ti.atomic_min(self.tcmm[0][j], _t)
-                _t = max(x[j], a[j], b[j])
-                ti.atomic_max(self.tcmm[1][j], _t)
-
-                ti.atomic_min(ccmin[j], self.objcenters[i][j])
-                ti.atomic_max(ccmax[j], self.objcenters[i][j])
-        
-        self.tcmm[2] = abs(ccmax - ccmin)
-
-        if _R > _L:
-            self.tcmm[3] /= float(_R - _L)
-
-    def split_aabb(self, left: int, right: int):
-        # print("_split_oct", left, right)
-        if left > right:
-            return None
-
-        tnode = self.TreeNode()
-        self._compute_box(left, right)
-        cmm = self.tcmm.to_numpy() # save value
-
-        tnode.cmin = cmm[0]
-        tnode.cmax = cmm[1]
-
-        if right - left == 1:
-            tnode.left = self.TreeNode(left)
-            return tnode
-
-        if right - left == 2:
-            tnode.left = self.TreeNode(left)
-            tnode.right = self.TreeNode(left + 1)
-            return tnode
-        
-        bsize = [(cmm[2][i], i) for i in range(3)]
-        bsize.sort(key=lambda x: x[0])
-
-        # print(bsize)
-        
-        # try to split
-        # left -------------------- lx -------------------- right
-        _x = bsize[-1][1]
-        center = cmm[3][_x]
-        lx = self._sort_triangles(center, left, right, _x)
-        if lx == left:
-            lx = left + 1
-        if lx == right:
-            lx = right - 1
-        
-        tnode.left = self.split_aabb(left, lx)
-        tnode.right = self.split_aabb(lx, right)
-        return tnode
+                ti.atomic_min(cmm[0][j], min(x[j], a[j], b[j]))
+                ti.atomic_max(cmm[1][j], max(x[j], a[j], b[j]))
+            # center
+            cmm[2] = 0.5 * (cmm[0] + cmm[1])
+            cmm[3] = abs(cmm[0] - cmm[1])
 
     @ti.kernel
-    def swap_obj(self, l: ti.i32, r: ti.i32):
-        cl = self.objcenters[l]
-        self.objcenters[l] = self.objcenters[r]
-        self.objcenters[r] = cl
+    def _align_kd_box(
+            self,
+            dst: ti.any_arr(),
+            objlist: ti.any_arr(),
+            axis: ti.i32,
+            left: ti.f32,
+            mx: ti.f32,
+            right: ti.f32):
+        # 0; not left nor right
+        # 1: left
+        # 2: right
+        # 3: left and right
 
-        tl = self.triangles[l]
-        self.triangles[l] = self.triangles[r]
-        self.triangles[r] = tl
+        for i in objlist:
+            # cmin, cmax, center
+            obox0 = 0.0
+            obox1 = 0.0
+            for j in ti.static(range(3)):
+                if j == axis:
+                    obox0 = self.objboxes[objlist[i], 0][j]
+                    obox1 = self.objboxes[objlist[i], 1][j]
+            _t = 0
+            if max(left, obox0) <= min(obox1, mx):
+                _t += 1
+            if max(mx, obox0) <= min(obox1, right):
+                _t += 2
 
-    def _sort_triangles(self, x: float, left: int, right: int, axis: int):
-        # simplily swap triangles
-        #  object < x || object > x
+            dst[i] = _t
 
-        # similar to quick sort
-        i, j = left, right - 1
-        while i < j:
-            while self.objcenters[i][axis] <= x and i < j:
-                i += 1
-                # lower move right
-            while self.objcenters[j][axis] >= x and i < j:
-                j -= 1
-                # upper move left
+    def _split_kd(self, objlist: list, depth, max_depth=128):
+        # print("_split_oct", left, right)
+        # (left, right]
 
-            if i < j:
-                self.swap_obj(i, j)
+        objlen = len(objlist)
+        objlist = np.asarray(objlist, dtype=np.int32)
 
-        return j
+        if len(objlist) == 0:
+            return None
+
+        root = KDTreeNode()
+        # cmm: cmin, cmax, center, size
+        cmm = ti.Vector.ndarray(3, ti.f32, shape=(4,))
+        self._compute_box(cmm, objlist)
+        root.cmin = cmm[0]
+        root.cmax = cmm[1]
+
+        if objlen < 8 or depth >= max_depth:
+            root.items = objlist
+            return root
+
+        # the axis of max size
+        axis = 0
+        bsize = cmm[3]
+        if bsize[0] > bsize[1]:
+            if bsize[0] > bsize[2]:  # 0 > 1; 0 > 2
+                axis = 0
+            else:  # 2 > 0; 0 > 1;
+                axis = 2
+        else:  # 1 > 0
+            if bsize[1] > bsize[2]:  # 1 > 0; 1 > 2
+                axis = 1
+            else:  # 2 > 1; 1 > 0;
+                axis = 2
+
+        dst = ti.ndarray(ti.i32, objlen)
+
+        self._align_kd_box(
+            dst,
+            objlist,
+            axis,
+            float(cmm[0][axis]),
+            float(cmm[2][axis]),
+            float(cmm[1][axis]),
+        )
+
+        left = []
+        right = []
+        mid = []
+        for i in range(objlen):
+            if dst[i] == 1:
+                left.append(objlist[i])
+            elif dst[i] == 2:
+                right.append(objlist[i])
+            elif dst[i] == 3:
+                mid.append(objlist[i])
+
+        if len(mid) == objlen:
+            # all is in the left
+            root.items = objlist
+            return root
+
+        root.mid = self._split_kd(mid, depth+1, depth+1)  # max depth = depth
+        root.left = self._split_kd(left, depth+1, max_depth)
+        root.right = self._split_kd(right, depth+1, max_depth)
+
+        return root
 
 
 @ti.data_oriented
@@ -630,22 +636,31 @@ class TriangleSoup:
         else:
             self.color = color
 
-        self.face_count = ti.field(ti.i32, ())
-        self.face_count[None] = 0
-        self.octree = ti.Struct.field({
-            "cmin": ti.types.vector(3, ti.f32),
-            "cmax": ti.types.vector(3, ti.f32),
-            "subn": ti.types.vector(2, ti.i32),
-        })
-        self.octlist = ti.field(ti.i32)
-
-        count = count * count
-        if count > 64:
-            count = int(math.ceil(count / 32))
-
-        block = ti.root.pointer(ti.i, 32).dense(ti.i, count)
-        block.place(self.octree)
-        block.place(self.octlist)
+        # num faces, num nodes
+        self.counts = ti.field(ti.i32, (2))
+        self.counts[0] = 0
+        # [kdflat]
+        # 0: corner index;
+        # 1: mark
+        # if mark >= 0:
+        #   1: left index
+        #   2: right index
+        #   3: mid index
+        # else:
+        #   2: data len (n)
+        #   3+0: triangle index 0
+        #   3+1: triangle index 1
+        #   ...: .....
+        #   3+n-1: triangle index n-1
+        #
+        # next block
+        self.kdflat = ti.field(ti.i32)
+        ti.root.pointer(ti.i, int(np.ceil(2*count / 64))
+                        ).dense(ti.i, 64).place(self.kdflat)
+        self.kdcmin = ti.Vector.field(3, ti.f32)
+        self.kdcmax = ti.Vector.field(3, ti.f32)
+        ti.root.pointer(ti.i, int(np.ceil(count / 64)))\
+            .dense(ti.i, 64).place(self.kdcmin, self.kdcmax)
 
     def append(self, a, x, b, material=None, color=None):
         if material is None:
@@ -655,7 +670,7 @@ class TriangleSoup:
 
         info = _parallelogram_init(a, x, b)
 
-        i = self.face_count[None]
+        i = self.counts[0]
 
         if info[3] > 1e-12:
             # < 1e-12 not a triangle
@@ -668,35 +683,41 @@ class TriangleSoup:
             self.faces[i].material = material
             self.faces[i].color = color
 
-            self.face_count[None] += 1
+            self.counts[0] += 1
 
     def build_tree(self):
         print("start build tree")
-        octt = AABBTree(self.face_count[None], self.faces)
+        octt = KDTree(self.counts[0], self.faces)
         octt.build_tree()
-
-        print(octt.nodes_count())
-
-        octt.nodes_to_taichi(self.octree)
-
-        # print(self.octree)
+        octt.flat_tree_to_taichi(self.kdflat, self.kdcmin, self.kdcmax)
+        self.dump_tree()
         del octt
         print("end build tree")
-    
+        # exit(0)
+
     def dump_tree(self):
-        tlist = [0]
-        while len(tlist) > 0:
-            i = tlist.pop()
-            item = self.octree[i]
-            print("node", i, item.cmin, item.cmax)
-            for j in range(2):
-                sj = item.subn[j]
-                if sj < 0:
-                    # triangle
-                    sj = -1*(sj + 1)
-                    print("    tri", sj)
-                elif sj > 0:
-                    tlist.append(sj)
+        nlist = [0]
+        # print(self.kdflat)
+        while len(nlist) > 0:
+            idx = nlist.pop(-1)
+            cidx = self.kdflat[idx]
+            mark = self.kdflat[idx + 1]
+            if mark == -1:  # they are triangles
+                n = self.kdflat[idx + 2]
+                print("triangle", idx, self.kdcmin[cidx], self.kdcmax[cidx])
+                print(f"   data[{idx+3}:{idx+3+n}]", end=" ")
+                for i in range(n):
+                    print(self.kdflat[idx+3+i], end=" ")
+                print("")
+            else:
+                left = mark
+                right = self.kdflat[idx + 2]
+                mid = self.kdflat[idx + 3]
+                print("[node]", left, right, mid,
+                      self.kdcmin[cidx], self.kdcmax[cidx])
+                nlist.append(right)
+                nlist.append(left)
+                nlist.append(mid)
 
     @ti.func
     def _check_ab(self, alpha, beta):
@@ -704,6 +725,41 @@ class TriangleSoup:
         if alpha < 0.0 or beta < 0.0 or alpha + beta > 1.0:
             ans = 0
         return ans
+
+    @ti.func
+    def _iter_objects(self, ray, idx, time_min, time_max):
+        is_hit = 0
+        hit_point = ti.Vector([0.0, 0.0, 0.0])
+        hit_normal = ti.Vector([0.0, 1.0, 0.0])
+        is_inside = 0
+        material = 0
+        color = self.color
+
+        _n = self.kdflat[idx + 2]
+        for _oi in range(_n):
+            item = self.faces[self.kdflat[idx+3+_oi]]
+            # print("hit item", item.x)
+            if ray.direction.dot(item.n) < 0:
+                # ray hit plane
+                t = item.n.dot(item.x - ray.origin) / \
+                    item.n.dot(ray.direction)
+
+                if t > time_min and t < time_max:
+                    p = ray.at(t)
+
+                    alpha, beta = _parallelogram_alpha_beta(
+                        p - item.x, item.ax, item.bx, item.idetidx, item.idet)
+
+                    if self._check_ab(alpha, beta):
+                        # in the triangle | paralleogram
+                        is_hit = 1
+                        time_max = t  # !! update
+                        hit_point = p
+                        hit_normal = item.n
+                        material = item.material
+                        color = item.color
+
+        return is_hit, time_max, hit_point, hit_normal, material, color, is_inside
 
     @ti.func
     def ray_intersect(self, ray, time_min: float, time_max: float):
@@ -714,63 +770,64 @@ class TriangleSoup:
         material = 0
         color = self.color
 
-        # use oct tree
-        oclist_tail = 0
-        self.octlist[oclist_tail] = 0
+        idx = 0
+        flag, _ = ray_intersect_solid_box(
+            ray, self.kdcmin[0], self.kdcmax[0], time_min, time_max)
 
-        while oclist_tail >= 0:
+        while flag:
+            mark = self.kdflat[idx+1]
+            if mark < 0:  # triangles
+                flag = 0
+                info = self._iter_objects(ray, idx, time_min, time_max)
+                if info[0] == 1 and info[1] > time_min and info[1] < time_max:
+                    is_hit = 1
+                    time_max = info[1]
+                    hit_point = info[2]
+                    hit_normal = info[3]
+                    material = info[4]
+                    color = info[5]
+                    is_inside = info[6]
+            else:  # objects
+                _l = mark
+                _r = self.kdflat[idx+2]
+                _m = self.kdflat[idx+3]
 
-            node = self.octree[self.octlist[oclist_tail]]
-            oclist_tail -= 1
-            _hit, _time = ray_intersect_solid_box(
-                ray, node.cmin, node.cmax, time_min, time_max)
-            if _hit == 0:
-                continue
-            # print("oclist_tail", oclist_tail)
-            # print("ray hit solid box", _hit, node.cmin, node.cmax)
-            # enumerate 8 childs
-            for i in ti.static(range(2)):
-                _rci = node.subn[i]
-                # print("hitted, enum child", i, _rci)
-                # _rci == 0: no child
-                if _rci > 0:
-                    # this is a solid box
-                    # child is located at self.octree[_rci]
-                    oclist_tail += 1
-                    self.octlist[oclist_tail] = _rci  # append to list
-                elif _rci < 0:  # this is a triangle
-                    # _rci = -1 * (index + 1)
-                    # => index = -1 * (_rci + 1)
-                    _tri_idx = -1 * (_rci + 1)
-                    # do the triangle ray intersection
-                    item = self.faces[_tri_idx]
-                    # print("hit item", item.x)
+                _li = self.kdflat[_l]
+                _ri = self.kdflat[_r]
+                _mi = self.kdflat[_m]
 
-                    if ray.direction.dot(item.n) < 0:
-                        # ray hit plane
-                        t = item.n.dot(item.x - ray.origin) / \
-                            item.n.dot(ray.direction)
+                _hitm, _ = ray_intersect_solid_box(ray, self.kdcmin[_mi], self.kdcmax[_mi], time_min, time_max)
+                if _hitm == 1:
+                    # iter mid
+                    info = self._iter_objects(ray, _m, time_min, time_max)
+                    if info[0] == 1:
+                        is_hit = 1
+                        time_max = info[1]
+                        hit_point = info[2]
+                        hit_normal = info[3]
+                        material = info[4]
+                        color = info[5]
+                        is_inside = info[6]
 
-                        if t > time_min and t < time_max:
-                            p = ray.at(t)
+                _hitl, _tl = ray_intersect_solid_box(
+                    ray, self.kdcmin[_li], self.kdcmax[_li], time_min, time_max
+                )
+                _hitr, _tr = ray_intersect_solid_box(
+                    ray, self.kdcmin[_ri], self.kdcmax[_ri], time_min, time_max
+                )
 
-                            alpha, beta = _parallelogram_alpha_beta(
-                                p - item.x, item.ax, item.bx, item.idetidx, item.idet)
-
-                            if self._check_ab(alpha, beta):
-                                # in the triangle | paralleogram
-                                is_hit = 1
-                                time_max = t  # !! update time_max
-                                hit_point = p
-                                hit_normal = item.n
-                                material = item.material
-                                color = item.color
+                if _hitl == 1 and _tl < _tr:
+                    idx = _l
+                elif _hitr == 1 and _tr < _tl:
+                    idx = _r
+                else: # not hit 
+                    flag = 0
 
         return is_hit, time_max, hit_point, hit_normal, material, color, is_inside
 
     def __str__(self) -> str:
         items = []
-        for i in range(self.face_count):
+        for i in range(self.counts[None]):
             fi = self.faces[i]
             items.append(
                 f"x={fi.x}, ax={fi.ax}, bx={fi.bx}, n={fi.n}, material={fi.material}, color={fi.color}")
@@ -1016,16 +1073,14 @@ class Scene:
         for i in ti.static(range(len(self.objList))):
             info = self.objList[i].ray_intersect(ray, time_min, time_max)
             # print("hit obj", i, info, time_max)
-            if info[0] == 1:
-                if info[1] > time_min:
-                    is_hit = 1
-                    if time_max > info[1]:
-                        time_max = info[1]
-                        hit_point = info[2]
-                        hit_normal = info[3]
-                        material = info[4]
-                        color = info[5]
-                        is_inside = info[6]
+            if info[0] == 1 and info[1] > time_min and info[1] < time_max:
+                is_hit = 1
+                time_max = info[1]
+                hit_point = info[2]
+                hit_normal = info[3]
+                material = info[4]
+                color = info[5]
+                is_inside = info[6]
 
         return is_hit, time_max, hit_point, hit_normal, material, color, is_inside
 
