@@ -452,7 +452,7 @@ class KDTree:
                 cadd += _dxc
 
             kdflat[fidx + 1 + 3] = fidx + fadd
-            kdflat[fidx + fadd] = cidx # use the same box as root
+            kdflat[fidx + fadd] = cidx  # use the same box as root
             fadd += 1
             kdflat[fidx + fadd] = -1
             fadd += 1
@@ -807,7 +807,8 @@ class TriangleSoup:
         for _oi in range(_n):
             item = self.faces[self.kdflat[idx+3+_oi]]
             # print("hit item", item.x)
-            if ray.direction.dot(item.n) < 0:
+            rdn = ray.direction.dot(item.n)
+            if rdn != 0:
                 # ray hit plane
                 t = item.n.dot(item.x - ray.origin) / \
                     item.n.dot(ray.direction)
@@ -823,9 +824,15 @@ class TriangleSoup:
                         is_hit = 1
                         time_max = t  # !! update
                         hit_point = p
-                        hit_normal = item.n
                         material = item.material
                         color = item.color
+                        # rdn < 0; outside
+                        if rdn > 0:
+                            hit_normal = -1 * item.n
+                            is_inside = 1
+                        else:
+                            hit_normal = item.n
+                            is_inside = 0
 
         return is_hit, time_max, hit_point, hit_normal, material, color, is_inside
 
@@ -1218,3 +1225,77 @@ class Camera:
     @ti.func
     def get_ray(self, u, v):
         return Ray(self.cam_origin[None], self.cam_lower_left_corner[None] + u * self.cam_horizontal[None] + v * self.cam_vertical[None] - self.cam_origin[None])
+
+
+@ti.kernel
+def render(camera: ti.template(), canvas: ti.template(), scene: ti.template(), samples_per_pixel: float, max_depth: int):
+    image_width, image_height = canvas.shape
+    # print(image_width, image_height)
+    for i, j in canvas:
+        cc = ti.Vector([0.0, 0.0, 0.0])
+        u = (float(i) + ti.random()) / image_width
+        v = (float(j) + ti.random()) / image_height
+        ray = camera.get_ray(u, v)
+        for _ in range(samples_per_pixel):
+            cc += ray_color(ray, scene, max_depth)
+        canvas[i, j] += cc / samples_per_pixel
+
+# return info
+# 0,      1,        2,         3,          4,        5,     6
+# is_hit, hit_time, hit_point, hit_normal, material, color, is_inside
+
+
+@ti.func
+def ray_color(ray, scene, max_depth: int):
+    color_buffer = ti.Vector([0.0, 0.0, 0.0])
+    brightness = ti.Vector([1.0, 1.0, 1.0])
+    scattered_origin = ray.origin
+    scattered_direction = ray.direction
+    p_RR = 0.9
+    for n in range(max_depth):
+        if ti.random() > p_RR:
+            # print("break p_RR, depth", n)
+            break
+        info = scene.ray_intersect(Ray(scattered_origin, scattered_direction))
+        is_hit, hit_time, hit_point, hit_normal, material, color, is_inside = info
+        if is_hit == 0:
+            break
+        if material == M_light_source:
+            color_buffer = color * brightness
+            break
+        if material == M_diffuse:
+            target = hit_point + hit_normal + random_unit_vector()
+            scattered_direction = target - hit_point
+            scattered_origin = hit_point
+            brightness *= color
+        elif material == M_metal or material == M_fuzzy_metal:
+            scattered_origin = hit_point
+            scattered_direction = reflect(
+                scattered_direction.normalized(), hit_normal)
+
+            if material == M_fuzzy_metal:
+                scattered_direction += 0.4 * random_unit_vector()
+
+            # do not check normal vector
+            brightness *= color
+        elif material == M_dielectric:
+            refraction_ratio = 1.5
+            if is_inside == 0:
+                refraction_ratio = 1.0 / 1.5
+
+            scattered_direction = scattered_direction.normalized()
+            cos_theta = min(-scattered_direction.dot(hit_point), 1.0)
+            sin_theta = ti.sqrt(1.0 - cos_theta * cos_theta)
+            # total internal reflection
+            if refraction_ratio * sin_theta > 1.0 or reflectance(cos_theta, refraction_ratio) > ti.random():
+                scattered_direction = reflect(
+                    scattered_direction, hit_normal)
+            else:
+                scattered_direction = refract(
+                    scattered_direction, hit_normal, refraction_ratio)
+            scattered_origin = hit_point
+            brightness *= color
+
+        brightness /= p_RR
+
+    return color_buffer
