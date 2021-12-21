@@ -304,6 +304,7 @@ def _parallelogram_alpha_beta(px, ax, bx, idetidx, idet):
 
 # reference: https://stackoverflow.com/questions/2563849/ray-box-intersection-theory
 
+
 @ti.func
 def ray_intersect_solid_box_face(uhit, omin, omax, axis):
     """
@@ -319,11 +320,6 @@ def ray_intersect_solid_box_face(uhit, omin, omax, axis):
                 ans = 0
     # return umin <= uhit and uhit <= umax and vmin <= vhit and vhit <= vmax
     return ans
-
-
-def solid_box_intersect(amin, amax, bmin, bmax):
-    """id_box_intersect(amin, amax, bmin, bmax)"""
-    pass
 
 @ti.func
 def ray_intersect_solid_box(ray, cmin, cmax, time_min: float, time_max: float):
@@ -354,7 +350,7 @@ def ray_intersect_solid_box(ray, cmin, cmax, time_min: float, time_max: float):
                 ishit = ray_intersect_solid_box_face(hpoint, cmin, cmax, i)
                 if ishit == 1:
                     tmin = t
-            
+
             t = omax[i] / rdi
             if t > time_min and t < tmin:
                 hpoint = ray.at(t)
@@ -385,6 +381,7 @@ class KDTreeNode:
         self.left = None
         self.mid = None
         self.right = None
+
 
 @ti.data_oriented
 class KDTree:
@@ -483,12 +480,12 @@ class KDTree:
 
     @ti.kernel
     def _compute_box(self, cmm: ti.any_arr(), indexes: ti.any_arr()):
-        # cmm: cmin, cmax, center, size
 
         # init
-        for j in ti.static(range(3)):
-            cmm[0][j] = self.objs[indexes[0]].x[j]
-            cmm[1][j] = self.objs[indexes[0]].x[j]
+        cmin = ti.Vector([0.0, 0.0, 0.0])
+        cmax = ti.Vector([0.0, 0.0, 0.0])
+        Ex = ti.Vector([0.0, 0.0, 0.0])
+        Exx = ti.Vector([0.0, 0.0, 0.0])
 
         for i in indexes:
             ii = indexes[i]
@@ -497,14 +494,22 @@ class KDTree:
             a = di.ax + x  # ax = a - x
             b = di.bx + x  # bx - b - x
 
-            self.tcmm[3] += self.objcenters[i]
-
             for j in ti.static(range(3)):
-                ti.atomic_min(cmm[0][j], min(x[j], a[j], b[j]))
-                ti.atomic_max(cmm[1][j], max(x[j], a[j], b[j]))
-            # center
-            cmm[2] = 0.5 * (cmm[0] + cmm[1])
-            cmm[3] = abs(cmm[0] - cmm[1])
+                _cmin = min(x[j], a[j], b[j])
+                _cmax = max(x[j], a[j], b[j])
+                ti.atomic_min(cmin[j], _cmin)
+                ti.atomic_max(cmax[j], _cmax)
+                _sv = abs(_cmax - _cmin)
+                Ex[j] += _sv
+                Exx[j] += _sv * _sv
+
+        # cmm: cmin, cmax, size var
+        cmm[0] = cmin
+        cmm[1] = cmax
+        # V(x) = E(x^2) - E^2(x)
+        Ex /= indexes.shape[0]
+        Exx /= indexes.shape[0]
+        cmm[2] = Exx - Ex * Ex
 
     @ti.kernel
     def _align_kd_box(
@@ -547,8 +552,8 @@ class KDTree:
             return None
 
         root = KDTreeNode()
-        # cmm: cmin, cmax, center, size
-        cmm = ti.Vector.ndarray(3, ti.f32, shape=(4,))
+        # cmm: cmin, cmax, size var
+        cmm = ti.Vector.ndarray(3, ti.f32, shape=(3,))
         self._compute_box(cmm, objlist)
         root.cmin = cmm[0]
         root.cmax = cmm[1]
@@ -559,7 +564,7 @@ class KDTree:
 
         # the axis of max size
         axis = 0
-        bsize = cmm[3]
+        bsize = cmm[2]
         if bsize[0] > bsize[1]:
             if bsize[0] > bsize[2]:  # 0 > 1; 0 > 2
                 axis = 0
@@ -573,14 +578,11 @@ class KDTree:
 
         dst = ti.ndarray(ti.i32, objlen)
 
-        self._align_kd_box(
-            dst,
-            objlist,
-            axis,
-            float(cmm[0][axis]),
-            float(cmm[2][axis]),
-            float(cmm[1][axis]),
-        )
+        ll = float(cmm[0][axis])
+        rr = float(cmm[1][axis])
+
+        mx = self.search_split_line(objlist, axis, ll, rr)
+        self._align_kd_box(dst, objlist, axis, ll, mx, rr)
 
         left = []
         right = []
@@ -603,6 +605,57 @@ class KDTree:
         root.right = self._split_kd(right, depth+1, max_depth)
 
         return root
+
+    def search_split_line(self, objlist: np.ndarray, axis: int, ll, rr):
+        """
+        grid search split line along axis
+        """
+        best_mx = 0.0
+        best_cnt = objlist.shape[0]
+
+        alpha = 0.0
+
+        while alpha < 1.0:
+            mx = alpha * ll + (1.0 - alpha) * rr
+            cnt = self._kd_box_count_x(objlist, axis, ll, mx, rr)
+            if cnt < best_cnt:
+                best_mx = mx
+                best_cnt = cnt
+            alpha += 0.05
+
+        return best_mx
+
+    @ti.kernel
+    def _kd_box_count_x(
+            self,
+            objlist: ti.any_arr(),
+            axis: ti.i32,
+            left: ti.f32,
+            mx: ti.f32,
+            right: ti.f32) -> ti.f32:
+        lcnt = 0.0
+        rcnt = 0.0
+        mcnt = 0.0
+        for i in objlist:
+            # cmin, cmax, center
+            obox0 = 0.0
+            obox1 = 0.0
+            for j in ti.static(range(3)):
+                if j == axis:
+                    obox0 = self.objboxes[objlist[i], 0][j]
+                    obox1 = self.objboxes[objlist[i], 1][j]
+            hL = max(left, obox0) <= min(obox1, mx)
+            hR = max(mx, obox0) <= min(obox1, right)
+
+            if hL and hR:
+                mcnt += 1.0
+            elif hL:
+                lcnt += 1.0
+            else:
+                rcnt += 1.0
+
+        # just guess
+        return abs(lcnt - rcnt) + 0.5 * mcnt
 
 
 @ti.data_oriented
@@ -655,11 +708,11 @@ class TriangleSoup:
         #
         # next block
         self.kdflat = ti.field(ti.i32)
-        ti.root.pointer(ti.i, int(np.ceil(2*count / 64))
-                        ).dense(ti.i, 64).place(self.kdflat)
+        ti.root.pointer(ti.i, int(np.ceil(count*count / 64)))\
+            .dense(ti.i, 64).place(self.kdflat)
         self.kdcmin = ti.Vector.field(3, ti.f32)
         self.kdcmax = ti.Vector.field(3, ti.f32)
-        ti.root.pointer(ti.i, int(np.ceil(count / 64)))\
+        ti.root.pointer(ti.i, int(np.ceil(2*count / 64)))\
             .dense(ti.i, 64).place(self.kdcmin, self.kdcmax)
 
     def append(self, a, x, b, material=None, color=None):
@@ -696,16 +749,17 @@ class TriangleSoup:
         # exit(0)
 
     def dump_tree(self):
-        nlist = [0]
+        nlist = [(0, 'O')]
         # print(self.kdflat)
         while len(nlist) > 0:
-            idx = nlist.pop(-1)
-            cidx = self.kdflat[idx]
+            idx, tag = nlist.pop(-1)
+            # cidx = self.kdflat[idx]
             mark = self.kdflat[idx + 1]
             if mark == -1:  # they are triangles
                 n = self.kdflat[idx + 2]
-                print("triangle", idx, self.kdcmin[cidx], self.kdcmax[cidx])
-                print(f"   data[{idx+3}:{idx+3+n}]", end=" ")
+                # print("triangle", idx, self.kdcmin[cidx], self.kdcmax[cidx])
+                print("triangle", idx, end="")
+                print(f" ({tag}) data#{n}", end=" ")
                 for i in range(n):
                     print(self.kdflat[idx+3+i], end=" ")
                 print("")
@@ -713,11 +767,11 @@ class TriangleSoup:
                 left = mark
                 right = self.kdflat[idx + 2]
                 mid = self.kdflat[idx + 3]
-                print("[node]", left, right, mid,
-                      self.kdcmin[cidx], self.kdcmax[cidx])
-                nlist.append(right)
-                nlist.append(left)
-                nlist.append(mid)
+                # print("[node]", left, right, mid, self.kdcmin[cidx], self.kdcmax[cidx])
+                print("[node]", left, right, mid)
+                nlist.append((mid, 'M'))
+                nlist.append((right, 'R'))
+                nlist.append((left, 'L'))
 
     @ti.func
     def _check_ab(self, alpha, beta):
@@ -796,7 +850,8 @@ class TriangleSoup:
                 _ri = self.kdflat[_r]
                 _mi = self.kdflat[_m]
 
-                _hitm, _ = ray_intersect_solid_box(ray, self.kdcmin[_mi], self.kdcmax[_mi], time_min, time_max)
+                _hitm, _ = ray_intersect_solid_box(
+                    ray, self.kdcmin[_mi], self.kdcmax[_mi], time_min, time_max)
                 if _hitm == 1:
                     # iter mid
                     info = self._iter_objects(ray, _m, time_min, time_max)
@@ -820,7 +875,7 @@ class TriangleSoup:
                     idx = _l
                 elif _hitr == 1 and _tr < _tl:
                     idx = _r
-                else: # not hit 
+                else:  # not hit
                     flag = 0
 
         return is_hit, time_max, hit_point, hit_normal, material, color, is_inside
