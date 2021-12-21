@@ -1,10 +1,6 @@
-from numpy.core.defchararray import index
 import taichi as ti
 import numpy as np
 import math
-
-HIT_TIME_MIN = 1e-4
-HIT_TIME_MAX = 1e+9
 
 
 def _var_as_tuple(x, length):
@@ -321,6 +317,7 @@ def ray_intersect_solid_box_face(uhit, omin, omax, axis):
     # return umin <= uhit and uhit <= umax and vmin <= vhit and vhit <= vmax
     return ans
 
+
 @ti.func
 def ray_intersect_solid_box(ray, cmin, cmax, time_min: float, time_max: float):
     """
@@ -381,6 +378,7 @@ class KDTreeNode:
         self.left = None
         self.mid = None
         self.right = None
+        self.lritems = None
 
 
 @ti.data_oriented
@@ -428,6 +426,7 @@ class KDTree:
         #   1: left index
         #   2: right index
         #   3: mid index
+        #   4： lr data index
         # else:
         #   2: data len (n)
         #   3+0: triangle index 0
@@ -444,13 +443,25 @@ class KDTree:
         fadd, cadd = 1, 1
 
         if root.items is None:  # have childs
-            fadd += 3  # left right mid
+            fadd += 4  # left right mid, lrdata
             for i, child in enumerate([root.left, root.right, root.mid]):
                 kdflat[fidx + 1 + i] = fidx + fadd
                 _dxf, _dxc = self._flat_tree_to_taichi(
                     kdflat, kdcmin, kdcmax, fidx + fadd, cidx + cadd, child)
                 fadd += _dxf
                 cadd += _dxc
+
+            kdflat[fidx + 1 + 3] = fidx + fadd
+            kdflat[fidx + fadd] = cidx # use the same box as root
+            fadd += 1
+            kdflat[fidx + fadd] = -1
+            fadd += 1
+            # data len
+            kdflat[fidx + fadd] = len(root.lritems)
+            fadd += 1
+            for i in root.lritems:
+                kdflat[fidx + fadd] = i
+                fadd += 1
         else:
             # write to kdflat
             # left index set to self; no more left node
@@ -603,6 +614,7 @@ class KDTree:
         root.mid = self._split_kd(mid, depth+1, depth+1)  # max depth = depth
         root.left = self._split_kd(left, depth+1, max_depth)
         root.right = self._split_kd(right, depth+1, max_depth)
+        root.lritems = np.asarray(left + right, dtype=np.int32)
 
         return root
 
@@ -699,6 +711,7 @@ class TriangleSoup:
         #   1: left index
         #   2: right index
         #   3: mid index
+        #   4： lr data index
         # else:
         #   2: data len (n)
         #   3+0: triangle index 0
@@ -767,6 +780,7 @@ class TriangleSoup:
                 left = mark
                 right = self.kdflat[idx + 2]
                 mid = self.kdflat[idx + 3]
+                # lrd = self.kdflat[idx + 4]
                 # print("[node]", left, right, mid, self.kdcmin[cidx], self.kdcmax[cidx])
                 print("[node]", left, right, mid)
                 nlist.append((mid, 'M'))
@@ -845,6 +859,7 @@ class TriangleSoup:
                 _l = mark
                 _r = self.kdflat[idx+2]
                 _m = self.kdflat[idx+3]
+                _lr = self.kdflat[idx+4]
 
                 _li = self.kdflat[_l]
                 _ri = self.kdflat[_r]
@@ -864,16 +879,19 @@ class TriangleSoup:
                         color = info[5]
                         is_inside = info[6]
 
-                _hitl, _tl = ray_intersect_solid_box(
+                _hitl, _ = ray_intersect_solid_box(
                     ray, self.kdcmin[_li], self.kdcmax[_li], time_min, time_max
                 )
-                _hitr, _tr = ray_intersect_solid_box(
+                _hitr, _ = ray_intersect_solid_box(
                     ray, self.kdcmin[_ri], self.kdcmax[_ri], time_min, time_max
                 )
 
-                if _hitl == 1 and _tl < _tr:
+                if _hitl == 1 and _hitr == 1:
+                    # we should iter both left and right
+                    idx = _lr
+                elif _hitl == 1:
                     idx = _l
-                elif _hitr == 1 and _tr < _tl:
+                elif _hitr == 1:
                     idx = _r
                 else:  # not hit
                     flag = 0
