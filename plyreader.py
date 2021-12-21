@@ -1,5 +1,4 @@
 import numpy as np
-from taichi.lang.impl import expr_init_list
 
 PLY_PROPERTY_DTYPE = {
     "char": "i1",
@@ -11,7 +10,6 @@ PLY_PROPERTY_DTYPE = {
     "float": "f4",
     "double": "f8",
 }
-
 
 class PLYReader:
     def __init__(self) -> None:
