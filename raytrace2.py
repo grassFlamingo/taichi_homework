@@ -65,14 +65,14 @@ def ray_color_01(ray: ti.template()):
 
 scene = Scene.Scene()
 
-# scene.append(
-#     Scene.Box.new(
-#         ti.Vector([0, 5, 2]),
-#         ti.Vector([5, 0.2, 3]),
-#         Scene.M_metal,
-#         ti.Vector([0.2, 0.8, 0.5]),
-#     )
-# )
+scene.append(
+    Scene.Box.new(
+        ti.Vector([5, 5, 2]),
+        ti.Vector([5, 0.2, 3]),
+        Scene.M_metal,
+        color = ti.Vector([0.2, 0.8, 0.5]),
+    )
+)
 
 scene.append(
     Scene.Sphere(
@@ -102,17 +102,6 @@ soup = Scene.TriangleSoup(
     Scene.M_diffuse,
     imageio.imread("./hidden/test-small.jpeg")  
 )
-
-# cweig = np.array([0.5, 0.9, 0.6])
-# for a, b, c in ply.it_points_3():
-#     # print(a, b, c, rgba)
-#     soup.append(
-#         ti.Vector(a),
-#         ti.Vector(b),
-#         ti.Vector(c),
-#         color=ti.Vector(np.random.rand(3) * cweig))
-
-soup.build_tree()
 
 # exit(0)
 

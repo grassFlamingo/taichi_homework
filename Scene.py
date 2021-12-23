@@ -16,9 +16,10 @@ def _var_as_tuple(x, length):
     else:
         return tuple([x for _ in range(length)])
 
-def _ensure_ti_field(x):
+
+def _ensure_ti_field(x, default=None):
     if x is None:
-        return None
+        return default
     elif isinstance(x, np.ndarray):
         if x.dtype == np.float32:
             tty = ti.f32
@@ -236,6 +237,7 @@ class Plane:
 
     def __str__(self) -> str:
         return "Plane()"
+
 
 @ti.pyfunc
 def _parallelogram_init(a, x, b):
@@ -720,7 +722,7 @@ class TriangleSoup:
     - texture: 
     """
 
-    def __init__(self, vertex, faces, material=M_unknown, texture=None) -> None:
+    def __init__(self, vertex, faces, material=M_unknown, texture=None, color=None) -> None:
         self.vertex = _ensure_ti_field(vertex)
         self.faces = _ensure_ti_field(faces)
 
@@ -729,9 +731,14 @@ class TriangleSoup:
                 if texture.dtype == np.uint8:
                     texture = np.asarray(texture, np.float32)
                     texture /= 255.0
-                
-        self.texture = _ensure_ti_field(texture)
-        self.has_texture = texture is not None
+        self.has_texture = ti.field(ti.i32, (1,))
+        if texture is None:
+            self.has_texture[0] = 0
+        else:
+            self.has_texture[0] = 1
+
+        self.texture = _ensure_ti_field(texture, ti.field(ti.f32, (1,1,3)))
+        self.default_color = color if color is not None else ti.Vector([1.0, 1.0, 1.0])
 
         if vertex.shape[1] == 8:
             self.vertex_s = 6
@@ -777,16 +784,20 @@ class TriangleSoup:
         self.kdcmax = ti.Vector.field(3, ti.f32)
         ti.root.pointer(ti.i, int(np.ceil(2*self.count / 64)))\
             .dense(ti.i, 64).place(self.kdcmin, self.kdcmax)
-        
+
         self._init_meshes(self.count)
+        self.build_tree()
 
     @ti.kernel
-    def _init_meshes(self, n:int):
+    def _init_meshes(self, n: int):
         for i in range(n):
-            p0, p1, p2 = self.faces[i,0], self.faces[i,1], self.faces[i,2]
-            a = ti.Vector([self.vertex[p0,0], self.vertex[p0,1], self.vertex[p0,2]])
-            x = ti.Vector([self.vertex[p1,0], self.vertex[p1,1], self.vertex[p1,2]])
-            b = ti.Vector([self.vertex[p2,0], self.vertex[p2,1], self.vertex[p2,2]])
+            p0, p1, p2 = self.faces[i, 0], self.faces[i, 1], self.faces[i, 2]
+            a = ti.Vector(
+                [self.vertex[p0, 0], self.vertex[p0, 1], self.vertex[p0, 2]])
+            x = ti.Vector(
+                [self.vertex[p1, 0], self.vertex[p1, 1], self.vertex[p1, 2]])
+            b = ti.Vector(
+                [self.vertex[p2, 0], self.vertex[p2, 1], self.vertex[p2, 2]])
 
             info = _parallelogram_init(a, x, b)
             # ax, bx, normal, area, detidx, idet
@@ -838,41 +849,49 @@ class TriangleSoup:
                 nlist.append((left, 'L'))
 
     @ti.func
-    def _get_color(self, meshidx, alpha:float, beta:float):
+    def _get_color(self, meshidx, alpha: float, beta: float):
         # idx is the index of triangle in self.meshes
-        texshape = ti.Vector([
-            float(self.texture.shape[0] - 1), 
-            float(self.texture.shape[1] - 1), 
-        ]) 
-        ans = ti.Vector([1.0, 1.0, 1.0])
-        if meshidx >= 0 and ti.static(self.has_texture):
+        ans = self.default_color
+        texshape = ti.Vector([0.0, 0.0])
+        # print(self.has_texture[0])
+
+        if meshidx >= 0 and self.has_texture[0] == 1:
             # have texture map
             # compute i,j
             #    a
             #   /
             #  /
             # x ----- b
-            p0, p1, p2 = self.faces[meshidx, 0], self.faces[meshidx, 1], self.faces[meshidx, 2]
-            a_st = ti.Vector([self.vertex[p0, self.vertex_s], self.vertex[p0, self.vertex_t]])
-            x_st = ti.Vector([self.vertex[p1, self.vertex_s], self.vertex[p1, self.vertex_t]])
-            b_st = ti.Vector([self.vertex[p2, self.vertex_s], self.vertex[p2, self.vertex_t]])
+            p0 = self.faces[meshidx, 0] 
+            p1 = self.faces[meshidx, 1]
+            p2 = self.faces[meshidx, 2]
+            a_st = ti.Vector([self.vertex[p0, self.vertex_s],
+                              self.vertex[p0, self.vertex_t]])
+            x_st = ti.Vector([self.vertex[p1, self.vertex_s],
+                              self.vertex[p1, self.vertex_t]])
+            b_st = ti.Vector([self.vertex[p2, self.vertex_s],
+                              self.vertex[p2, self.vertex_t]])
 
             # print("alpha, beta", alpha, beta)
 
             ax_st = a_st - x_st
             bx_st = b_st - x_st
 
+            texshape = ti.Vector([
+                float(self.texture.shape[0] - 1),
+                float(self.texture.shape[1] - 1),
+            ])
             pij = (x_st + alpha * ax_st + beta * bx_st) * texshape
 
             rpij = ti.round(pij)
 
             pi = int(rpij[0])
             pj = int(rpij[1])
-            
+
             ans = ti.Vector([
-                self.texture[pi,pj,0],
-                self.texture[pi,pj,1],
-                self.texture[pi,pj,2],
+                self.texture[pi, pj, 0],
+                self.texture[pi, pj, 1],
+                self.texture[pi, pj, 2],
             ])
         return ans
 
@@ -901,7 +920,7 @@ class TriangleSoup:
             item = self.meshes[meshidx]
             # print("hit item", item.x)
             rdn = ray.direction.dot(item.n)
-            if rdn < 0:
+            if rdn != 0:
                 # ray hit plane
                 t = item.n.dot(item.x - ray.origin) / \
                     item.n.dot(ray.direction)
@@ -950,7 +969,8 @@ class TriangleSoup:
             if mark < 0:  # triangles
                 flag = 0
                 info = self._iter_objects(ray, idx, time_min, time_max)
-                if info[0] == 1:# and info[4] > time_min and info[4] < time_max:
+                # and info[4] > time_min and info[4] < time_max:
+                if info[0] == 1:
                     is_hit = 1
                     hit_meshidx = info[1]
                     hit_alpha = info[2]
@@ -974,7 +994,8 @@ class TriangleSoup:
                 if _hitm == 1:
                     # iter mid
                     info = self._iter_objects(ray, _m, time_min, time_max)
-                    if info[0] == 1:# and info[4] > time_min and info[4] < time_max:
+                    # and info[4] > time_min and info[4] < time_max:
+                    if info[0] == 1:
                         is_hit = 1
                         hit_meshidx = info[1]
                         hit_alpha = info[2]
@@ -1000,7 +1021,6 @@ class TriangleSoup:
                     idx = _r
                 else:  # not hit
                     flag = 0
-        
 
         color = self._get_color(hit_meshidx, hit_alpha, hit_beta)
 
@@ -1032,8 +1052,8 @@ class ParallelogramSoup(TriangleSoup):
     All x, a, b are 3-dimensional vectors
     """
 
-    def __init__(self, count, material=M_unknown, color=None) -> None:
-        super().__init__(count, material, color)
+    def __init__(self, vertex, faces, material=M_unknown, texture=None, color=None) -> None:
+        super().__init__(vertex, faces, material, texture, color)
 
     # only need to rewrite this function
     @ti.func
@@ -1057,13 +1077,14 @@ class Box(ParallelogramSoup):
     |        | /
     c ------ d
 
-    a---f
-    | 0 |
-    x---b---f---a---x
-    | 2 | 1 | 3 | 4 |
-    c---d---g---e---c
-    | 5 |
-    e---g
+    .75 a---f
+        | 0 |
+    .5  x---b---f---a---x
+        | 2 | 1 | 3 | 4 |
+    .25 c---d---g---e---c
+        | 5 |
+    0   e---g
+        0   .25 .5 .75  1
     ```
 
     - d = x + (c-x) + (b-x) = b + c - x;
@@ -1077,12 +1098,7 @@ class Box(ParallelogramSoup):
         all normal vectors are point inside
     """
 
-    def __init__(self, a, x, b, c, material, color, normal_out=True) -> None:
-        super().__init__(6)
-        # self.volume = ti.abs((a - x).dot((b-x).cross((c-x))))
-
-        material = _var_as_tuple(material, 6)
-        color = _var_as_tuple(color, 6)
+    def __init__(self, a, x, b, c, material, texture=None, color=None, normal_out=True) -> None:
 
         d = b + c - x
         e = a + c - x
@@ -1090,25 +1106,39 @@ class Box(ParallelogramSoup):
         # g = d + e - c
 
         # print(x, a, b, c, d, e, f, g)
-        if normal_out:
-            self.append(a, x, b, material[0], color[0])
-            self.append(f, b, d, material[1], color[1])
-            self.append(b, x, c, material[2], color[2])
-            self.append(e, a, f, material[3], color[3])
-            self.append(c, x, a, material[4], color[4])
-            self.append(d, c, e, material[5], color[5])
-        else:
-            self.append(b, x, a, material[0], color[0])
-            self.append(d, b, f, material[1], color[1])
-            self.append(c, x, b, material[2], color[2])
-            self.append(f, a, e, material[3], color[3])
-            self.append(a, x, c, material[4], color[4])
-            self.append(e, c, d, material[5], color[5])
+        vertex = np.asarray([
+            [a[0], a[1], a[2], 0.0, 0.0, 0.0, 0.00, 0.75],
+            [x[0], x[1], x[2], 0.0, 0.0, 0.0, 0.00, 0.50],
+            [b[0], b[1], b[2], 0.0, 0.0, 0.0, 0.25, 0.50],
+            [c[0], c[1], c[2], 0.0, 0.0, 0.0, 0.00, 0.25],
+            [d[0], d[1], d[2], 0.0, 0.0, 0.0, 0.25, 0.25],
+            [e[0], e[1], e[2], 0.0, 0.0, 0.0, 0.75, 0.25],
+            [f[0], f[1], f[2], 0.0, 0.0, 0.0, 0.50, 0.50],
+        ], dtype=np.float32)
 
-        self.build_tree()
+        # a x b c d e f
+        # 0 1 2 3 4 5 6
+
+        if normal_out:
+            faces = [[0, 1, 2],
+                     [6, 2, 4],
+                     [2, 1, 3],
+                     [5, 0, 6],
+                     [3, 1, 0],
+                     [4, 3, 5]]
+        else:
+            faces = [[2, 1, 0],
+                     [4, 2, 6],
+                     [3, 1, 2],
+                     [6, 0, 5],
+                     [0, 1, 3],
+                     [5, 3, 4]]
+
+        faces = np.asarray(faces, dtype=np.int32)
+        super().__init__(vertex, faces, material, texture, color)
 
     @staticmethod
-    def new(center, size, material, color, normal_out=True):
+    def new(center, size, material, texture=None, color=None, normal_out=True):
         halfs = size / 2.0
 
         x = ti.Vector([
@@ -1128,7 +1158,7 @@ class Box(ParallelogramSoup):
             center[1] - halfs[1],
             center[2] - halfs[2]])
 
-        return Box(a, x, b, c, material, color, normal_out)
+        return Box(a, x, b, c, material, texture, color, normal_out)
 
 
 @ti.data_oriented
