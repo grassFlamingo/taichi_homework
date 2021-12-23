@@ -778,8 +778,6 @@ class TriangleSoup:
         ti.root.pointer(ti.i, int(np.ceil(2*self.count / 64)))\
             .dense(ti.i, 64).place(self.kdcmin, self.kdcmax)
         
-        print(self.kdflat.shape, self.kdcmin.shape)
-
         self._init_meshes(self.count)
 
     @ti.kernel
@@ -842,6 +840,10 @@ class TriangleSoup:
     @ti.func
     def _get_color(self, meshidx, alpha:float, beta:float):
         # idx is the index of triangle in self.meshes
+        texshape = ti.Vector([
+            float(self.texture.shape[0] - 1), 
+            float(self.texture.shape[1] - 1), 
+        ]) 
         ans = ti.Vector([1.0, 1.0, 1.0])
         if meshidx >= 0 and ti.static(self.has_texture):
             # have texture map
@@ -860,10 +862,12 @@ class TriangleSoup:
             ax_st = a_st - x_st
             bx_st = b_st - x_st
 
-            ploc = x_st + alpha * ax_st + beta * bx_st
+            pij = (x_st + alpha * ax_st + beta * bx_st) * texshape
 
-            pi = ti.round(ploc[0] * (self.texture.shape[0] - 1))
-            pj = ti.round(ploc[1] * (self.texture.shape[1] - 1))
+            rpij = ti.round(pij)
+
+            pi = int(rpij[0])
+            pj = int(rpij[1])
             
             ans = ti.Vector([
                 self.texture[pi,pj,0],
