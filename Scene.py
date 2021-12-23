@@ -1,6 +1,10 @@
+from locale import NOEXPR
 import taichi as ti
 import numpy as np
 import math
+import warnings
+
+from taichi.lang.ops import bit_xor
 
 
 def _var_as_tuple(x, length):
@@ -11,6 +15,26 @@ def _var_as_tuple(x, length):
             return tuple([x for _ in range(length)])
     else:
         return tuple([x for _ in range(length)])
+
+def _ensure_ti_field(x):
+    if x is None:
+        return None
+    elif isinstance(x, np.ndarray):
+        if x.dtype == np.float32:
+            tty = ti.f32
+        elif x.dtype == np.int32:
+            tty = ti.i32
+        elif x.dtype == np.int8:
+            tty = ti.i8
+        elif x.dtype == np.uint8:
+            tty = ti.u8
+        else:
+            raise ValueError(f"unsupported dtype {x.dtype}")
+        out = ti.field(tty, x.shape)
+        out.from_numpy(x)
+        return out
+    else:
+        return x
 
 # these 8 functions below are copied from course examples
 
@@ -213,7 +237,7 @@ class Plane:
     def __str__(self) -> str:
         return "Plane()"
 
-
+@ti.pyfunc
 def _parallelogram_init(a, x, b):
     """
     ```
@@ -228,28 +252,34 @@ def _parallelogram_init(a, x, b):
     normal = bx.cross(ax)
     area = normal.norm()  # what is the norm is 0?
     # assert area >= 1e-12, "not a parallelogram"
-    normal = normal / area
-
-    # | i     j     k     |
-    # | ax[0] ax[1] ax[2] |
-    # | bx[0] bx[1] bx[2] |
-    # try to compute its 2D determinant
-
-    det = ax[1] * bx[2] - ax[2] * bx[1]
     detidx = 0
-    if ti.abs(det) < 1e-8:
-        # previous det is too small; try another one
-        det = ax[0] * bx[2] - ax[2] * bx[0]
-        detidx = 1
+    idet = 0.0
+    if area < 1e-12:
+        # not a parallglogram
+        normal = ti.Vector([0.0, 0.0, 0.0])
+    else:
+        normal = normal / area
 
-    if ti.abs(det) < 1e-8:
-        # previous dets are too small; try another one
-        det = ax[0] * bx[1] - ax[1] * bx[0]
-        detidx = 2
+        # | i     j     k     |
+        # | ax[0] ax[1] ax[2] |
+        # | bx[0] bx[1] bx[2] |
+        # try to compute its 2D determinant
 
-    # assert(ti.abs(det) > 1e-8)  # "this could not happen, just for case"
+        det = ax[1] * bx[2] - ax[2] * bx[1]
+        if ti.abs(det) < 1e-8:
+            # previous det is too small; try another one
+            det = ax[0] * bx[2] - ax[2] * bx[0]
+            detidx = 1
 
-    return ax, bx, normal, area, detidx, 1.0 / det
+        if ti.abs(det) < 1e-8:
+            # previous dets are too small; try another one
+            det = ax[0] * bx[1] - ax[1] * bx[0]
+            detidx = 2
+
+        idet = 1.0 / det
+
+    # assert(ti.abs(det) > 1e-8)  # "this could not happen, just in case"
+    return ax, bx, normal, area, detidx, idet
 
 
 @ti.func
@@ -386,12 +416,12 @@ class KDTree:
     """KD Tree; only works for TriangleSoup and ParallelogramSoup
     """
 
-    def __init__(self, count, faces) -> None:
-        self.count = count
-        self.objs = faces
+    def __init__(self, meshes) -> None:
+        self.count = meshes.shape[0]
+        self.meshes = meshes
         self.root = None
         # cmin, cmax
-        self.objboxes = ti.Vector.field(3, ti.f32, (count, 2))
+        self.meshboxes = ti.Vector.field(3, ti.f32, (self.count, 2))
         self._compute_obj_boxes()
 
     def build_tree(self):
@@ -480,14 +510,14 @@ class KDTree:
     def _compute_obj_boxes(self):
         # num faces is self.count <- static alert
         for i in range(self.count):
-            di = self.objs[i]
+            di = self.meshes[i]
             x = di.x
             a = di.ax + x  # ax = a - x
             b = di.bx + x  # bx = b - x
 
             for j in ti.static(range(3)):
-                self.objboxes[i, 0][j] = min(x[j], a[j], b[j])
-                self.objboxes[i, 1][j] = max(x[j], a[j], b[j])
+                self.meshboxes[i, 0][j] = min(x[j], a[j], b[j])
+                self.meshboxes[i, 1][j] = max(x[j], a[j], b[j])
 
     @ti.kernel
     def _compute_box(self, cmm: ti.any_arr(), indexes: ti.any_arr()):
@@ -500,7 +530,7 @@ class KDTree:
 
         for i in indexes:
             ii = indexes[i]
-            di = self.objs[ii]
+            di = self.meshes[ii]
             x = di.x
             a = di.ax + x  # ax = a - x
             b = di.bx + x  # bx - b - x
@@ -542,8 +572,8 @@ class KDTree:
             obox1 = 0.0
             for j in ti.static(range(3)):
                 if j == axis:
-                    obox0 = self.objboxes[objlist[i], 0][j]
-                    obox1 = self.objboxes[objlist[i], 1][j]
+                    obox0 = self.meshboxes[objlist[i], 0][j]
+                    obox1 = self.meshboxes[objlist[i], 1][j]
             _t = 0
             if max(left, obox0) <= min(obox1, mx):
                 _t += 1
@@ -654,8 +684,8 @@ class KDTree:
             obox1 = 0.0
             for j in ti.static(range(3)):
                 if j == axis:
-                    obox0 = self.objboxes[objlist[i], 0][j]
-                    obox1 = self.objboxes[objlist[i], 1][j]
+                    obox0 = self.meshboxes[objlist[i], 0][j]
+                    obox1 = self.meshboxes[objlist[i], 1][j]
             hL = max(left, obox0) <= min(obox1, mx)
             hR = max(mx, obox0) <= min(obox1, right)
 
@@ -681,29 +711,49 @@ class TriangleSoup:
 
     n (normal vector is up)
     ```
+
+    Require: 
+    - vertex: 3d points (x,y,z) or or (x,y,z,s,t) or (x,y,z,nx,ny,nz,s,t)
+        - if vertex contains (s,t), texture is enabled
+    - faces: the faces
+    - matrial: material
+    - texture: 
     """
 
-    def __init__(self, count, material=M_unknown, color=None) -> None:
-        self.faces = ti.Struct.field({
+    def __init__(self, vertex, faces, material=M_unknown, texture=None) -> None:
+        self.vertex = _ensure_ti_field(vertex)
+        self.faces = _ensure_ti_field(faces)
+
+        if texture is not None:
+            if isinstance(texture, np.ndarray):
+                if texture.dtype == np.uint8:
+                    texture = np.asarray(texture, np.float32)
+                    texture /= 255.0
+                
+        self.texture = _ensure_ti_field(texture)
+        self.has_texture = texture is not None
+
+        if vertex.shape[1] == 8:
+            self.vertex_s = 6
+            self.vertex_t = 7
+        else:
+            if texture is not None:
+                warnings.warn("vertex do not contains (s,t), ignore texture")
+            texture = None
+
+        self.count = self.faces.shape[0]
+
+        self.meshes = ti.Struct.field({
             "x": ti.types.vector(3, ti.f32),
             "ax": ti.types.vector(3, ti.f32),
             "bx": ti.types.vector(3, ti.f32),
             "n": ti.types.vector(3, ti.f32),
             "idetidx": ti.i32,
             "idet": ti.f32,
-            "material": ti.i32,
-            "color": ti.types.vector(3, ti.f32),
-        }, count)
+        }, self.count)
 
         self.material = material
-        if color is None:
-            self.color = ti.Vector([1.0, 1.0, 1.0])
-        else:
-            self.color = color
 
-        # num faces, num nodes
-        self.counts = ti.field(ti.i32, (2))
-        self.counts[0] = 0
         # [kdflat]
         # 0: corner index;
         # 1: mark
@@ -721,42 +771,44 @@ class TriangleSoup:
         #
         # next block
         self.kdflat = ti.field(ti.i32)
-        ti.root.pointer(ti.i, int(np.ceil(count*count / 64)))\
+        ti.root.pointer(ti.i, int(np.ceil(self.count*self.count / 64)))\
             .dense(ti.i, 64).place(self.kdflat)
         self.kdcmin = ti.Vector.field(3, ti.f32)
         self.kdcmax = ti.Vector.field(3, ti.f32)
-        ti.root.pointer(ti.i, int(np.ceil(2*count / 64)))\
+        ti.root.pointer(ti.i, int(np.ceil(2*self.count / 64)))\
             .dense(ti.i, 64).place(self.kdcmin, self.kdcmax)
+        
+        print(self.kdflat.shape, self.kdcmin.shape)
 
-    def append(self, a, x, b, material=None, color=None):
-        if material is None:
-            material = self.material
-        if color is None:
-            color = self.color
+        self._init_meshes(self.count)
 
-        info = _parallelogram_init(a, x, b)
+    @ti.kernel
+    def _init_meshes(self, n:int):
+        for i in range(n):
+            p0, p1, p2 = self.faces[i,0], self.faces[i,1], self.faces[i,2]
+            a = ti.Vector([self.vertex[p0,0], self.vertex[p0,1], self.vertex[p0,2]])
+            x = ti.Vector([self.vertex[p1,0], self.vertex[p1,1], self.vertex[p1,2]])
+            b = ti.Vector([self.vertex[p2,0], self.vertex[p2,1], self.vertex[p2,2]])
 
-        i = self.counts[0]
+            info = _parallelogram_init(a, x, b)
+            # ax, bx, normal, area, detidx, idet
 
-        if info[3] > 1e-12:
-            # < 1e-12 not a triangle
-            self.faces[i].x = x
-            self.faces[i].ax = info[0]
-            self.faces[i].bx = info[1]
-            self.faces[i].n = info[2]
-            self.faces[i].idetidx = info[4]
-            self.faces[i].idet = info[5]
-            self.faces[i].material = material
-            self.faces[i].color = color
+            # print("mesh", i, info[2], info[4], info[5])
 
-            self.counts[0] += 1
+            self.meshes[i].x = x
+            self.meshes[i].ax = info[0]
+            self.meshes[i].bx = info[1]
+            self.meshes[i].n = info[2]
+            self.meshes[i].idetidx = info[4]
+            self.meshes[i].idet = info[5]
 
     def build_tree(self):
         print("start build tree")
-        octt = KDTree(self.counts[0], self.faces)
+        octt = KDTree(self.meshes)
         octt.build_tree()
         octt.flat_tree_to_taichi(self.kdflat, self.kdcmin, self.kdcmax)
         self.dump_tree()
+        # print(self.meshes)
         del octt
         print("end build tree")
         # exit(0)
@@ -788,6 +840,39 @@ class TriangleSoup:
                 nlist.append((left, 'L'))
 
     @ti.func
+    def _get_color(self, meshidx, alpha:float, beta:float):
+        # idx is the index of triangle in self.meshes
+        ans = ti.Vector([1.0, 1.0, 1.0])
+        if meshidx >= 0 and ti.static(self.has_texture):
+            # have texture map
+            # compute i,j
+            #    a
+            #   /
+            #  /
+            # x ----- b
+            p0, p1, p2 = self.faces[meshidx, 0], self.faces[meshidx, 1], self.faces[meshidx, 2]
+            a_st = ti.Vector([self.vertex[p0, self.vertex_s], self.vertex[p0, self.vertex_t]])
+            x_st = ti.Vector([self.vertex[p1, self.vertex_s], self.vertex[p1, self.vertex_t]])
+            b_st = ti.Vector([self.vertex[p2, self.vertex_s], self.vertex[p2, self.vertex_t]])
+
+            # print("alpha, beta", alpha, beta)
+
+            ax_st = a_st - x_st
+            bx_st = b_st - x_st
+
+            ploc = x_st + alpha * ax_st + beta * bx_st
+
+            pi = ti.round(ploc[0] * (self.texture.shape[0] - 1))
+            pj = ti.round(ploc[1] * (self.texture.shape[1] - 1))
+            
+            ans = ti.Vector([
+                self.texture[pi,pj,0],
+                self.texture[pi,pj,1],
+                self.texture[pi,pj,2],
+            ])
+        return ans
+
+    @ti.func
     def _check_ab(self, alpha, beta):
         ans = 1
         if alpha < 0.0 or beta < 0.0 or alpha + beta > 1.0:
@@ -800,15 +885,19 @@ class TriangleSoup:
         hit_point = ti.Vector([0.0, 0.0, 0.0])
         hit_normal = ti.Vector([0.0, 1.0, 0.0])
         is_inside = 0
-        material = 0
-        color = self.color
+
+        hit_meshidx = -1
+        hit_alpha = -1.0
+        hit_beta = -1.0
 
         _n = self.kdflat[idx + 2]
+        # print("iter", _n)
         for _oi in range(_n):
-            item = self.faces[self.kdflat[idx+3+_oi]]
+            meshidx = self.kdflat[idx+3+_oi]
+            item = self.meshes[meshidx]
             # print("hit item", item.x)
             rdn = ray.direction.dot(item.n)
-            if rdn != 0:
+            if rdn < 0:
                 # ray hit plane
                 t = item.n.dot(item.x - ray.origin) / \
                     item.n.dot(ray.direction)
@@ -822,19 +911,20 @@ class TriangleSoup:
                     if self._check_ab(alpha, beta):
                         # in the triangle | paralleogram
                         is_hit = 1
+                        hit_meshidx = meshidx
+                        hit_alpha = alpha
+                        hit_beta = beta
                         time_max = t  # !! update
                         hit_point = p
-                        material = item.material
-                        color = item.color
-                        # rdn < 0; outside
                         if rdn > 0:
                             hit_normal = -1 * item.n
                             is_inside = 1
+                        # rdn < 0; outside
                         else:
                             hit_normal = item.n
                             is_inside = 0
 
-        return is_hit, time_max, hit_point, hit_normal, material, color, is_inside
+        return is_hit, hit_meshidx, hit_alpha, hit_beta, time_max, hit_point, hit_normal, is_inside
 
     @ti.func
     def ray_intersect(self, ray, time_min: float, time_max: float):
@@ -842,26 +932,29 @@ class TriangleSoup:
         hit_point = ti.Vector([0.0, 0.0, 0.0])
         hit_normal = ti.Vector([0.0, 1.0, 0.0])
         is_inside = 0
-        material = 0
-        color = self.color
 
         idx = 0
         flag, _ = ray_intersect_solid_box(
             ray, self.kdcmin[0], self.kdcmax[0], time_min, time_max)
+
+        hit_meshidx = -1
+        hit_alpha = -1.0
+        hit_beta = -1.0
 
         while flag:
             mark = self.kdflat[idx+1]
             if mark < 0:  # triangles
                 flag = 0
                 info = self._iter_objects(ray, idx, time_min, time_max)
-                if info[0] == 1 and info[1] > time_min and info[1] < time_max:
+                if info[0] == 1:# and info[4] > time_min and info[4] < time_max:
                     is_hit = 1
-                    time_max = info[1]
-                    hit_point = info[2]
-                    hit_normal = info[3]
-                    material = info[4]
-                    color = info[5]
-                    is_inside = info[6]
+                    hit_meshidx = info[1]
+                    hit_alpha = info[2]
+                    hit_beta = info[3]
+                    time_max = info[4]
+                    hit_point = info[5]
+                    hit_normal = info[6]
+                    is_inside = info[7]
             else:  # objects
                 _l = mark
                 _r = self.kdflat[idx+2]
@@ -877,14 +970,15 @@ class TriangleSoup:
                 if _hitm == 1:
                     # iter mid
                     info = self._iter_objects(ray, _m, time_min, time_max)
-                    if info[0] == 1:
+                    if info[0] == 1:# and info[4] > time_min and info[4] < time_max:
                         is_hit = 1
-                        time_max = info[1]
-                        hit_point = info[2]
-                        hit_normal = info[3]
-                        material = info[4]
-                        color = info[5]
-                        is_inside = info[6]
+                        hit_meshidx = info[1]
+                        hit_alpha = info[2]
+                        hit_beta = info[3]
+                        time_max = info[4]
+                        hit_point = info[5]
+                        hit_normal = info[6]
+                        is_inside = info[7]
 
                 _hitl, _ = ray_intersect_solid_box(
                     ray, self.kdcmin[_li], self.kdcmax[_li], time_min, time_max
@@ -902,13 +996,16 @@ class TriangleSoup:
                     idx = _r
                 else:  # not hit
                     flag = 0
+        
 
-        return is_hit, time_max, hit_point, hit_normal, material, color, is_inside
+        color = self._get_color(hit_meshidx, hit_alpha, hit_beta)
+
+        return is_hit, time_max, hit_point, hit_normal, self.material, color, is_inside
 
     def __str__(self) -> str:
         items = []
-        for i in range(self.counts[None]):
-            fi = self.faces[i]
+        for i in range(self.info[None]):
+            fi = self.meshes[i]
             items.append(
                 f"x={fi.x}, ax={fi.ax}, bx={fi.bx}, n={fi.n}, material={fi.material}, color={fi.color}")
         items = "\n  ".join(items)
@@ -1164,11 +1261,10 @@ class Scene:
 
         return is_hit, time_max, hit_point, hit_normal, material, color, is_inside
 
-# codes are copied from course examples
-
 
 @ti.data_oriented
 class Camera:
+    # codes are copied from course examples
     def __init__(self, fov=60, aspect_ratio=1.0) -> None:
         # Camera parameters
         self.lookfrom = ti.Vector.field(3, dtype=ti.f32, shape=())

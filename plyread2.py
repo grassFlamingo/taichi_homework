@@ -9,6 +9,7 @@
 # 	float s, t;		// texture coords
 # };
 # we won't check the order of x y z nx ny nz s t
+# ref http://www.paulbourke.net/dataformats/ply/
 
 from os import sep
 import numpy as np
@@ -59,6 +60,10 @@ class NPLYReader:
             self.vertex.append(
                 np.fromstring(line, dtype=np.float32, sep=" ", count=p)
             )
+        
+        self.vertex = np.asarray(self.vertex, dtype=np.float32)
+
+        # print(self.vertex)
 
         self.faces = []
         # read faces
@@ -77,6 +82,8 @@ class NPLYReader:
                     items[c+2],
                 ))
         self.numFaces = len(self.faces)
+        self.faces = np.asarray(self.faces, dtype=np.int32)
+        # print(self.faces)
         ply.close()
 
     def iter_points(self):
@@ -125,7 +132,10 @@ class NPLYReader:
         ```
         """
         for a, b, c in self.faces:
-            x = self.vertex[a][(0, 1, 2, 6, 7)]
-            y = self.vertex[b][(0, 1, 2, 6, 7)]
-            z = self.vertex[c][(0, 1, 2, 6, 7)]
-            yield x, y, z
+            x = self.vertex[a][(0, 1, 2)]
+            y = self.vertex[b][(0, 1, 2)]
+            z = self.vertex[c][(0, 1, 2)]
+            xst = self.vertex[a][(6,7)]
+            yst = self.vertex[b][(6,7)]
+            zst = self.vertex[c][(6,7)]
+            yield x, y, z, xst, yst, zst
