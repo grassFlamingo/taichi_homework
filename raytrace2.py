@@ -1,8 +1,7 @@
-import imageio
 import taichi as ti
 import Scene
 import numpy as np
-import itertools
+import PIL.Image
 
 from plyread2 import NPLYReader
 
@@ -20,7 +19,6 @@ canvas = ti.Vector.field(3, dtype=ti.f32, shape=(image_width, image_height))
 samples_per_pixel = 4
 max_depth = 64
 
-
 @ti.kernel
 def render_01(camera: ti.template()):
     # for i, j in itertools.product(range(image_width, image_height)):
@@ -31,88 +29,52 @@ def render_01(camera: ti.template()):
         color = ray_color_01(ray)
         canvas[i, j] += color
 
-
-colors_table = ti.Vector.field(3, ti.f32, 8)
-
-
-@ti.kernel
-def init_color_table():
-    for i in range(8):
-        colors_table[i] = Scene.rand3()
-
-
-init_color_table()
-
-
 @ti.func
 def ray_color_01(ray: ti.template()):
     default_color = ti.Vector([0.0, 0.0, 0.0])
     info = scene.ray_intersect(ray)
-    # is_hit = 0
-    # for i in ti.static(range(8)):
-    #     ci = soup.octree[0].child[i]
-    #     if is_hit == 0:
-    #         if ci > 0:
-    #             is_hit, _ = Scene.ray_intersect_solid_box(ray, soup.octree[ci].cmin, soup.octree[ci].cmax, 1e-8, 1e+8)
-    #             # print(is_hit, soup.octree[ci].cmin, soup.octree[ci].cmax)
-    #             default_color = colors_table[i]
-
     if info[0] == 1:
         default_color = info[5]
         # print("hit time", info[1])
     return default_color
 
-
 scene = Scene.Scene()
 
 scene.append(
-    Scene.Box.new(
-        ti.Vector([5, 5, 2]),
-        ti.Vector([5, 0.2, 3]),
-        Scene.M_metal,
-        color = ti.Vector([0.2, 0.8, 0.5]),
-    )
-)
-
-scene.append(
     Scene.Sphere(
-        ti.Vector([0, 0, 7]),
-        1.0,
+        ti.Vector([-2, 2, 8]),
+        2.0,
         Scene.M_light_source,
         ti.Vector([10.0, 10.0, 10.0])
     )
 )
 
-# ssoup = Scene.SphereSoup(8*8*8)
-
-# for i, j, k in itertools.product(range(8), range(8), range(8)):
-#     ssoup.append(ti.Vector([i-4, j-4, k-4]), 0.1, Scene.M_metal,
-#                  ti.Vector(np.random.rand(3) * 0.8 + 0.1))
-
 # scene.append(ssoup, "sphere soup")
-ply = NPLYReader("./hidden/cristal.ply")
-# ply.read_ply("./hidden/potted_plant_01_4k_bin.ply")
-# ply.read_ply("./hidden/tree2.ply")
-# ply = NPLYReader("./hidden/tree2.ply")
-# ply.read_ply("./hidden/rock.ply")
+ply_main = NPLYReader("./mesh/main-main.ply")
+ply_crystal = NPLYReader("./mesh/main-crystal.ply")
+texture_img = np.asarray(PIL.Image.open(
+    "./mesh/main-2-big.png").rotate(-90), dtype=np.float32) / 255.0
 
-soup = Scene.TriangleSoup(
-    ply.vertex, 
-    ply.faces, 
+texture = Scene._ensure_ti_field(texture_img)
+
+scene.append(Scene.TriangleSoup(
+    ply_main.vertex,
+    ply_main.faces,
     Scene.M_diffuse,
-    imageio.imread("./hidden/test-small.jpeg")  
-)
+    texture
+))
 
-# exit(0)
-
-
-scene.append(soup, "tree")
-
+scene.append(Scene.TriangleSoup(
+    ply_crystal.vertex,
+    ply_crystal.faces,
+    Scene.M_dielectric,
+    texture
+))
 canvas.fill(0)
 
 camera = Scene.Camera()
-camera.set_look_from(10.0, 0.0, 8.0)
-camera.set_look_at(0.0, 0.0, 1.5)
+camera.set_look_from(16.0, -2.0, 10.0)
+camera.set_look_at(0.0, 0.0, 0.0)
 camera.reset()
 
 gui = ti.GUI("ray tracing", res=(image_width, image_height))
@@ -126,7 +88,8 @@ while gui.running:
 
         if not e.key in "jkliopasdqwe":
             continue
-
+        # if e.key == gui.LMB:
+        #     # left mose click
         if e.key == 'j':  # look at x +
             camera.set_look_at(ax-delta, ay, az)
         elif e.key == 'k':  # looa at y +
@@ -157,8 +120,8 @@ while gui.running:
         print("look form", camera.look_from(), "look at", camera.look_at())
 
     cnt += 1
-    render_01(camera)
-    # Scene.render(camera, canvas, scene, samples_per_pixel, max_depth)
+    # render_01(camera)
+    Scene.render(camera, canvas, scene, samples_per_pixel, max_depth)
     gui.set_image(np.sqrt(canvas.to_numpy() / cnt))
 
     gui.show()

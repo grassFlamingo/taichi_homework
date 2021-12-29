@@ -1,11 +1,7 @@
-from locale import NOEXPR
 import taichi as ti
 import numpy as np
 import math
 import warnings
-
-from taichi.lang.ops import bit_xor
-
 
 def _var_as_tuple(x, length):
     if isinstance(x, (tuple, list)):
@@ -256,7 +252,7 @@ def _parallelogram_init(a, x, b):
     # assert area >= 1e-12, "not a parallelogram"
     detidx = 0
     idet = 0.0
-    if area < 1e-12:
+    if area < 1e-8:
         # not a parallglogram
         normal = ti.Vector([0.0, 0.0, 0.0])
     else:
@@ -527,8 +523,6 @@ class KDTree:
         # init
         cmin = ti.Vector([0.0, 0.0, 0.0])
         cmax = ti.Vector([0.0, 0.0, 0.0])
-        Ex = ti.Vector([0.0, 0.0, 0.0])
-        Exx = ti.Vector([0.0, 0.0, 0.0])
 
         for i in indexes:
             ii = indexes[i]
@@ -542,17 +536,10 @@ class KDTree:
                 _cmax = max(x[j], a[j], b[j])
                 ti.atomic_min(cmin[j], _cmin)
                 ti.atomic_max(cmax[j], _cmax)
-                _sv = abs(_cmax - _cmin)
-                Ex[j] += _sv
-                Exx[j] += _sv * _sv
 
         # cmm: cmin, cmax, size var
         cmm[0] = cmin
         cmm[1] = cmax
-        # V(x) = E(x^2) - E^2(x)
-        Ex /= indexes.shape[0]
-        Exx /= indexes.shape[0]
-        cmm[2] = Exx - Ex * Ex
 
     @ti.kernel
     def _align_kd_box(
@@ -596,35 +583,41 @@ class KDTree:
 
         root = KDTreeNode()
         # cmm: cmin, cmax, size var
-        cmm = ti.Vector.ndarray(3, ti.f32, shape=(3,))
+        cmm = ti.Vector.ndarray(3, ti.f32, shape=(2,))
         self._compute_box(cmm, objlist)
         root.cmin = cmm[0]
         root.cmax = cmm[1]
 
-        if objlen < 8 or depth >= max_depth:
+        if objlen < 16 or depth >= max_depth:
             root.items = objlist
             return root
 
         # the axis of max size
-        axis = 0
-        bsize = cmm[2]
-        if bsize[0] > bsize[1]:
-            if bsize[0] > bsize[2]:  # 0 > 1; 0 > 2
-                axis = 0
-            else:  # 2 > 0; 0 > 1;
-                axis = 2
-        else:  # 1 > 0
-            if bsize[1] > bsize[2]:  # 1 > 0; 1 > 2
-                axis = 1
-            else:  # 2 > 1; 1 > 0;
-                axis = 2
 
         dst = ti.ndarray(ti.i32, objlen)
+
+        mx0, cnt0 = self.search_split_line(objlist, 0, cmm)
+        mx1, cnt1 = self.search_split_line(objlist, 1, cmm)
+        mx2, cnt2 = self.search_split_line(objlist, 2, cmm)
+        
+        if cnt0 < cnt1:
+            if cnt0 < cnt2:  # 0 < 1; 0 < 2
+                axis = 0
+                mx = mx0
+            else:  # 2 < 0; 0 < 1;
+                axis = 2
+                mx = mx2
+        else:  # 1 < 0
+            if cnt1 < cnt2:  # 1 < 0; 1 < 2
+                axis = 1
+                mx = mx1
+            else:  # 2 < 1; 1 < 0;
+                axis = 2
+                mx = mx2
 
         ll = float(cmm[0][axis])
         rr = float(cmm[1][axis])
 
-        mx = self.search_split_line(objlist, axis, ll, rr)
         self._align_kd_box(dst, objlist, axis, ll, mx, rr)
 
         left = []
@@ -650,12 +643,14 @@ class KDTree:
 
         return root
 
-    def search_split_line(self, objlist: np.ndarray, axis: int, ll, rr):
+    def search_split_line(self, objlist: np.ndarray, axis: int, cmm):
         """
         grid search split line along axis
         """
         best_mx = 0.0
         best_cnt = objlist.shape[0]
+        ll = float(cmm[0][axis])
+        rr = float(cmm[1][axis])
 
         alpha = 0.0
 
@@ -667,7 +662,7 @@ class KDTree:
                 best_cnt = cnt
             alpha += 0.05
 
-        return best_mx
+        return best_mx, best_cnt
 
     @ti.kernel
     def _kd_box_count_x(
@@ -719,7 +714,7 @@ class TriangleSoup:
         - if vertex contains (s,t), texture is enabled
     - faces: the faces
     - matrial: material
-    - texture: 
+    - texture: texture map is needed to be rotated by -pi/2 (-90 degree)
     """
 
     def __init__(self, vertex, faces, material=M_unknown, texture=None, color=None) -> None:
@@ -872,21 +867,18 @@ class TriangleSoup:
             b_st = ti.Vector([self.vertex[p2, self.vertex_s],
                               self.vertex[p2, self.vertex_t]])
 
-            # print("alpha, beta", alpha, beta)
-
             ax_st = a_st - x_st
             bx_st = b_st - x_st
 
             texshape = ti.Vector([
-                float(self.texture.shape[0] - 1),
-                float(self.texture.shape[1] - 1),
+                float(self.texture.shape[0]) - 1.0,
+                float(self.texture.shape[1]) - 1.0,
             ])
-            pij = (x_st + alpha * ax_st + beta * bx_st) * texshape
 
-            rpij = ti.round(pij)
+            pij = ti.round((x_st + alpha * ax_st + beta * bx_st) * texshape)
 
-            pi = int(rpij[0])
-            pj = int(rpij[1])
+            pi = int(pij[0])
+            pj = int(pij[1])
 
             ans = ti.Vector([
                 self.texture[pi, pj, 0],
@@ -920,32 +912,33 @@ class TriangleSoup:
             item = self.meshes[meshidx]
             # print("hit item", item.x)
             rdn = ray.direction.dot(item.n)
-            if rdn != 0:
-                # ray hit plane
-                t = item.n.dot(item.x - ray.origin) / \
-                    item.n.dot(ray.direction)
+            if ti.abs(rdn) < 1e-5:
+                continue
+            # ray hit plane
+            t = item.n.dot(item.x - ray.origin) / \
+                item.n.dot(ray.direction)
 
-                if t > time_min and t < time_max:
-                    p = ray.at(t)
+            if t > time_min and t < time_max:
+                p = ray.at(t)
 
-                    alpha, beta = _parallelogram_alpha_beta(
-                        p - item.x, item.ax, item.bx, item.idetidx, item.idet)
+                alpha, beta = _parallelogram_alpha_beta(
+                    p - item.x, item.ax, item.bx, item.idetidx, item.idet)
 
-                    if self._check_ab(alpha, beta):
-                        # in the triangle | paralleogram
-                        is_hit = 1
-                        hit_meshidx = meshidx
-                        hit_alpha = alpha
-                        hit_beta = beta
-                        time_max = t  # !! update
-                        hit_point = p
-                        if rdn > 0:
-                            hit_normal = -1 * item.n
-                            is_inside = 1
-                        # rdn < 0; outside
-                        else:
-                            hit_normal = item.n
-                            is_inside = 0
+                if self._check_ab(alpha, beta):
+                    # in the triangle | paralleogram
+                    is_hit = 1
+                    hit_meshidx = meshidx
+                    hit_alpha = alpha
+                    hit_beta = beta
+                    time_max = t  # !! update
+                    hit_point = p
+                    if rdn > 0:
+                        hit_normal = -1 * item.n
+                        is_inside = 1
+                    # rdn < 0; outside
+                    else:
+                        hit_normal = item.n
+                        is_inside = 0
 
         return is_hit, hit_meshidx, hit_alpha, hit_beta, time_max, hit_point, hit_normal, is_inside
 
@@ -983,7 +976,6 @@ class TriangleSoup:
                 _l = mark
                 _r = self.kdflat[idx+2]
                 _m = self.kdflat[idx+3]
-                _lr = self.kdflat[idx+4]
 
                 _li = self.kdflat[_l]
                 _ri = self.kdflat[_r]
@@ -1014,7 +1006,7 @@ class TriangleSoup:
 
                 if _hitl == 1 and _hitr == 1:
                     # we should iter both left and right
-                    idx = _lr
+                    idx = self.kdflat[idx+4]
                 elif _hitl == 1:
                     idx = _l
                 elif _hitr == 1:
@@ -1318,8 +1310,18 @@ class Camera:
 
         self.reset()
 
+
+    def set_look_at(self, x: float, y: float, z: float):
+        self.lookat[None] = [x, y, z]
+
     def set_look_from(self, x: float, y: float, z: float):
         self.lookfrom[None] = [x, y, z]
+
+    def set_look_at_delta(self, x: float = 0, y: float = 0, z: float= 0):
+        self.lookat[None] += ti.Vector([x, y, z])
+
+    def set_look_from_delta(self, x: float=0, y: float=0, z: float=0):
+        self.lookfrom[None] += ti.Vector([x, y, z])
 
     def look_at(self):
         a = self.lookat[None]
@@ -1328,9 +1330,6 @@ class Camera:
     def look_from(self):
         a = self.lookfrom[None]
         return a[0], a[1], a[2]
-
-    def set_look_at(self, x: float, y: float, z: float):
-        self.lookat[None] = [x, y, z]
 
     def set_vup(self, x: float, y: float, z: float):
         vup = ti.Vector([x, y, z])

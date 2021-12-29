@@ -11,9 +11,7 @@
 # we won't check the order of x y z nx ny nz s t
 # ref http://www.paulbourke.net/dataformats/ply/
 
-from os import sep
 import numpy as np
-
 
 class NPLYReader:
     def __init__(self, filename) -> None:
