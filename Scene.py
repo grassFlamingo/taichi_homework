@@ -1318,10 +1318,12 @@ class Camera:
         self.lookfrom[None] = [x, y, z]
 
     def set_look_at_delta(self, x: float = 0, y: float = 0, z: float= 0):
-        self.lookat[None] += ti.Vector([x, y, z])
+        la = self.lookat[None]
+        self.lookat[None] = [la[0] + x, la[1] + y, la[2] + z]
 
     def set_look_from_delta(self, x: float=0, y: float=0, z: float=0):
-        self.lookfrom[None] += ti.Vector([x, y, z])
+        lf = self.lookfrom[None]
+        self.lookfrom[None] = [lf[0] + x, lf[1] + y, lf[2] + z]
 
     def look_at(self):
         a = self.lookat[None]
@@ -1351,7 +1353,7 @@ class Camera:
         self.cam_horizontal[None] = 2 * half_width * u
         self.cam_vertical[None] = 2 * half_height * v
 
-    @ti.func
+    @ti.pyfunc
     def get_ray(self, u, v):
         return Ray(self.cam_origin[None], self.cam_lower_left_corner[None] + u * self.cam_horizontal[None] + v * self.cam_vertical[None] - self.cam_origin[None])
 
