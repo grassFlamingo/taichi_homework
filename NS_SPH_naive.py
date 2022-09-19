@@ -19,14 +19,12 @@ dt = 0.001
 
 valid_particles = ti.field(ti.i32, ())
 
-particles = ti.Struct.field({
-    "rho": ti.f32,
-    "p": ti.f32, # pressure
-    "prr": ti.f32, # p / (rho * rho)
-    "dv": ti.types.vector(2, ti.f32),
-    "v": ti.types.vector(2, ti.f32),
-    "x": ti.types.vector(2, ti.f32)},
-    num_particles)
+particle_rho = ti.field(ti.f32, (num_particles,))
+particle_pressure = ti.field(ti.f32, (num_particles,)) # pressure
+particle_pdrr = ti.field(ti.f32, (num_particles,)) # p / (rho * rho)
+particle_dv = ti.Vector.field(2, ti.f32, (num_particles,))
+particle_v = ti.Vector.field(2, ti.f32, (num_particles,))
+particle_x = ti.Vector.field(2, ti.f32, (num_particles,))
 
 particle_neighbors = ti.field(ti.f32, (num_particles, num_particles))
 particle_neighbors.fill(0)
@@ -103,13 +101,15 @@ def cubic_kernel_laplace(r, r_norm):
     return ans
 
 
+# for each particles:
+#  search neighbors j
 @ti.kernel
 def search_neighbors():
     for i in range(num_particles):
-        pi = particles[i].x
+        pi = particle_x[i]
         for j in range(i+1, num_particles):
-            r = pi - particles[j].x
-            l = r.norm()
+            r = pi - particle_x[j]
+            l = r.norm() # TODO: optimize this
             if l > support_radius:
                 continue
             particle_neighbors[i, j] = l
@@ -120,23 +120,23 @@ def search_neighbors():
 def evaluate_densities():
     # compute densities and pressure
     for i in range(num_particles):
-        _xi = particles[i].x
+        _xi = particle_x[i]
         rho = 0.0
         for j in range(num_particles):
             if particle_neighbors[i, j] < 1e-4:
                 continue
-            l = (_xi - particles[j].x).norm()
+            l = (_xi - particle_x[j]).norm()
             rho += cubic_kernel(l)
         # print("rho i", i, rho)
-        particles[i].rho = rho * mass
-        particles[i].p = max(0.0, stiffness * mass * (rho - rho0))
-        particles[i].prr = particles[i].p / (particles[i].rho * particles[i].rho)
+        particle_rho[i] = rho * mass
+        particle_pressure[i] = max(0.0, stiffness * mass * (rho - rho0))
+        particle_pdrr[i] = particle_pressure[i] / (particle_rho[i] * particle_rho[i])
 
 @ti.kernel
 def sph_sample():
     gravity = ti.Vector([0.0, acc_g])
     for i in range(num_particles):
-        xi = particles[i]
+        xi = particle_x[i]
         vis = ti.Vector([0.0, 0.0])
         press = ti.Vector([0.0, 0.0])
         for j in range(num_particles):
@@ -144,44 +144,53 @@ def sph_sample():
             if l < 1e-6:
                 continue
 
-            xj = particles[j]
+            xj = particle_x[j]
 
-            r = xj.x - xi.x
+            r = xj - xi
 
             # 1. density is evaluated
             # 2. evaluate viscosity
             # v laplace(vi) = v sum_j m_j (vj-vi)/rhoj laplace(W_ij)
-            vis += r / xj.rho * cubic_kernel_laplace(r, l)
+            vis += r / particle_rho[j] * cubic_kernel_laplace(r, l)
 
             # print("c kernel lap", cubic_kernel_laplace(r, l))
 
             # 3. evaluate pressure gradient
-            press += (xj.prr + xi.prr) * cubic_kernel_derivative(r, l)
+            press += (particle_pdrr[j] + particle_pdrr[i]) * cubic_kernel_derivative(r, l)
         
         # print("vis", vis)
         # print("press", press)
     
-        particles[i].dv = gravity + press * mass + vis * viscosity * mass
+        particle_dv[i] = gravity + press * mass + vis * viscosity * mass
+
+# for each particles:
+#  sample the velocity/density field using SPH
+#  compute force/acceration using Navier-Stokes equaiton
+def sample_and_compute():
+    evaluate_densities()
+    sph_sample()
+
+
 
 @ti.kernel
 def update_particles():
     for i in range(num_particles):
-        px = particles[i].x
+        px = particle_x[i]
         if px[0] < 0.01:
-            particles[i].x[0] = 0.01
-            particles[i].v[0] *= -0.3
+            particle_v[i][0] = 0.01
+            particle_v[i][0] *= -0.3
         elif px[0] > 0.99:
-            particles[i].x[0] = 0.99
-            particles[i].v[0] *= -0.3
+            particle_x[i][0] = 0.99
+            particle_v[i][0] *= -0.3
         elif px[1] < 0.01:
-            particles[i].x[1] = 0.01
-            particles[i].v[1] *= -0.3
+            particle_x[i][1] = 0.01
+            particle_v[i][1] *= -0.3
         elif px[1] > 0.99:
-            particles[i].x[1] = 0.99
-            particles[i].v[1] *= -0.3
+            particle_x[i][1] = 0.99
+            particle_v[i][1] *= -0.3
         else:
-            particles[i].v += dt * particles[i].dv
-            particles[i].x += dt * particles[i].v
+            particle_v[i] += dt * particle_dv[i]
+            particle_x[i] += dt * particle_v[i]
 
 # pipeline
 # for each particles:
@@ -193,13 +202,10 @@ def update_particles():
 #  update velocity using acceleratin
 #  update position velocity
 
-
 def pipeline():
     particle_neighbors.fill(0.0)
     search_neighbors()
-    # print(particle_neighbors)
-    evaluate_densities()
-    sph_sample()
+    sample_and_compute()
     update_particles()
 
 
@@ -209,8 +215,8 @@ def system_init():
         _r = ti.random()*0.1
         _a = ti.random() * 2 * np.pi
         _xi = ti.Vector([0.5 + _r * ti.sin(_a) , 0.7 + _r * ti.cos(_a)])
-        particles[i].x = _xi
-        particles[i].v = [2.0, -10.0]
+        particle_x[i] = _xi
+        particle_v[i] = [2.0, -10.0]
 
 system_init()
 
@@ -221,8 +227,8 @@ gui = ti.GUI("NS_SPH", (800, 800))
 while gui.running:
 
     # draw particles
-    px = particles.to_numpy()
-    gui.circles(px["x"], radius=4, color=0x22ffee)
+    px = particle_x.to_numpy()
+    gui.circles(px, radius=1, color=0x22ffee)
 
     gui.show()
 
